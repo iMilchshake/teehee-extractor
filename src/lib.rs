@@ -1,3 +1,5 @@
+mod world;
+
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs::File;
@@ -8,8 +10,10 @@ use teehistorian_replayer::twgame_core::replay::{DemoChatWrite, DemoWrite};
 use teehistorian_replayer::twgame_core::twsnap::compat::ddnet::WriteError;
 use teehistorian_replayer::twgame_core::twsnap::time::Instant;
 use teehistorian_replayer::twgame_core::twsnap::Snap;
+use teehistorian_replayer::twgame_core::Snapper;
 use teehistorian_replayer::ThReplayer;
-use twgame::{DdnetReplayerWorld, Map};
+use twgame::{DdnetReplayerWorld, Map, ThHeader};
+use world::World;
 
 /// Data recorded for each game tick
 #[derive(Debug, Clone)]
@@ -21,12 +25,19 @@ pub struct TickData {
     pub freeze_status: f32,
 }
 
+/// Information about when and how a player finished the map
+#[derive(Debug, Clone)]
+pub struct FinishInfo {
+    pub tick: i64,          // Game tick when finish occurred
+    pub duration_secs: f32, // Run duration in seconds
+}
+
 /// Complete sequence of a player from join to leave
 #[derive(Debug, Clone)]
 pub struct PlayerSequence {
     pub player_name: String,
     pub team: i32,
-    pub finished: bool,
+    pub finish: Option<FinishInfo>,
     pub start_tick: i64,
     pub end_tick: i64,
     pub time_of_day: String,
@@ -39,6 +50,7 @@ struct DataCapturingWriter {
     sequences: HashMap<u32, Vec<TickData>>,
     player_info: HashMap<u32, (String, i32)>, // (name, team)
     current_tick: i64,
+    snap_count: u64,
 }
 
 impl DataCapturingWriter {
@@ -47,6 +59,7 @@ impl DataCapturingWriter {
             sequences: HashMap::new(),
             player_info: HashMap::new(),
             current_tick: 0,
+            snap_count: 0,
         }
     }
 }
@@ -62,20 +75,31 @@ impl DemoChatWrite for DataCapturingWriter {
     }
 }
 
-// Implement DemoWrite to capture game state at each tick
+// Implement DemoWrite for DdnetReplayerWorld to capture game state at each tick
 impl DemoWrite<DdnetReplayerWorld> for DataCapturingWriter {
     fn snap_and_write(
         &mut self,
         tick: Instant,
-        _world: &DdnetReplayerWorld,
+        world: &DdnetReplayerWorld,
         snap_buf: &mut Snap,
     ) -> Result<(), WriteError> {
+        self.snap_count += 1;
+
         // Convert Instant to tick number
         self.current_tick = tick.snap_tick() as i64;
+
+        // Clear the snapshot buffer before populating it
+        snap_buf.clear();
+
+        // IMPORTANT: Populate the snapshot buffer from the world state
+        world.snap(snap_buf);
+
+        dbg!("hi");
 
         // Extract player/tee data from the snapshot
         // The snapshot contains all game state including positions, angles, and freeze status
         for (snap_id, player) in snap_buf.players.iter() {
+            dbg!(&player);
             // Store player info (name and team)
             self.player_info
                 .entry(snap_id.0)
@@ -113,47 +137,105 @@ impl DemoWrite<DdnetReplayerWorld> for DataCapturingWriter {
     }
 }
 
+// Implement DemoWrite for World to enable demo writing
+impl DemoWrite<World> for DataCapturingWriter {
+    fn snap_and_write(
+        &mut self,
+        tick: Instant,
+        world: &World,
+        snap_buf: &mut Snap,
+    ) -> Result<(), WriteError> {
+        self.snap_count += 1;
+
+        // Same logic as DdnetReplayerWorld implementation
+        self.current_tick = tick.snap_tick() as i64;
+
+        // Clear the snapshot buffer before populating it
+        snap_buf.clear();
+
+        // IMPORTANT: Populate the snapshot buffer from the world state
+        world.snap(snap_buf);
+
+        for (snap_id, player) in snap_buf.players.iter() {
+            self.player_info
+                .entry(snap_id.0)
+                .or_insert_with(|| (player.name.to_string(), player.team));
+
+            if let Some(tee) = &player.tee {
+                let aim_angle = tee.angle.to_num::<f32>();
+                let is_frozen = tee.freeze_end > tick;
+                let freeze_status = if is_frozen { 1.0 } else { 0.0 };
+
+                let tick_data = TickData {
+                    tick: self.current_tick,
+                    pos_x: tee.pos.x.to_num::<f32>(),
+                    pos_y: tee.pos.y.to_num::<f32>(),
+                    aim_angle,
+                    freeze_status,
+                };
+
+                self.sequences
+                    .entry(snap_id.0)
+                    .or_insert_with(Vec::new)
+                    .push(tick_data);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn chat(&mut self) -> &mut (dyn DemoChatWrite + 'static) {
+        self
+    }
+}
+
 /// Extract player sequences from a teehistorian file using the replayer
-pub fn extract_sequences(teehistorian_path: &Path) -> Result<Vec<PlayerSequence>> {
+pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Vec<PlayerSequence>> {
     let file = File::open(teehistorian_path)
         .with_context(|| format!("Failed to open file: {}", teehistorian_path.display()))?;
 
     let mut th_stream = ThCompat::parse(ThBufReader::new(file))?;
 
-    // Extract map name from header
-    let mut map_name = String::from("unknown");
-    if let Ok(header) = th_stream.header() {
-        if let Ok(header_str) = std::str::from_utf8(header) {
-            if let Some(map_start) = header_str.find("map_name") {
-                if let Some(map_slice) = header_str.get(map_start..) {
-                    if let Some(name) = map_slice.split('\0').nth(1) {
-                        map_name = name.to_string();
-                    }
-                }
-            }
-        }
+    // Parse teehistorian header to extract metadata
+    let header_raw = th_stream.header()?;
+    let th_header = ThHeader::from_buf(header_raw);
+
+    let map_name = th_header.map_name.clone();
+    let start_time = th_header.start_time.clone();
+    let map_sha256 = th_header.map_sha256.clone();
+
+    println!("  Map: {}", map_name);
+    println!("  Start time: {}", start_time);
+    if let Some(ref sha256) = map_sha256 {
+        println!("  Map SHA256: {}", sha256);
     }
 
-    // Create a minimal map for the world
-    // In production, load the actual map file from the teehistorian header
-    let map_data = create_minimal_map()?;
+    // Load the map from the maps directory
+    println!("  Loading map from: {}", maps_dir.display());
+    let map_data = load_map_from_dir(maps_dir, &map_name, map_sha256.as_deref())?;
+    println!("  Map loaded successfully ({} bytes)", map_data.len());
+
     let mut parsed_map = twmap::TwMap::parse(&map_data)?;
     let map = Map::try_from(&mut parsed_map).map_err(|e| anyhow::anyhow!(e))?;
     let map = Arc::new(map);
 
-    // Create the replayer world
-    let header_raw = th_stream.header()?;
-    let mut world = DdnetReplayerWorld::new(map, false);
+    // Create the replayer world with finish tracking
+    let inner_world = DdnetReplayerWorld::new(map, false);
+    let mut world = World::new(inner_world);
 
     // Create our custom data capturing writer
     let mut data_writer = DataCapturingWriter::new();
 
-    // Use the replayer to replay the game and capture data
+    // Replay the game and capture data
+    println!("  Processing teehistorian file...");
     let replayer = ThReplayer::new(header_raw, &mut world);
     replayer.validate(&mut world, &mut th_stream, Some(&mut data_writer));
 
+    // Extract finish information from the world wrapper
+    let finishes = world.finishes;
+
     // Convert captured data to PlayerSequence
-    let time_of_day = chrono::Utc::now().to_rfc3339(); // TODO: now? xd
+    let time_of_day = start_time;
     let sequences: Vec<PlayerSequence> = data_writer
         .sequences
         .into_iter()
@@ -168,10 +250,13 @@ pub fn extract_sequences(teehistorian_path: &Path) -> Result<Vec<PlayerSequence>
                 .cloned()
                 .unwrap_or_else(|| (format!("player_{}", player_id), 0));
 
+            // Look up finish info for this player
+            let finish = finishes.get(&player_name).cloned();
+
             PlayerSequence {
                 player_name,
                 team,
-                finished: false, // TODO: could extract from finishes in world
+                finish,
                 start_tick,
                 end_tick,
                 time_of_day: time_of_day.clone(),
@@ -184,28 +269,43 @@ pub fn extract_sequences(teehistorian_path: &Path) -> Result<Vec<PlayerSequence>
     Ok(sequences)
 }
 
-/// Create a minimal valid DDNet map
-///
-/// NOTE: This creates a very basic empty map. For production use with real
-/// teehistorian files, you should load the actual map file referenced in the header.
-fn create_minimal_map() -> Result<Vec<u8>> {
-    // Use a pre-generated minimal valid map binary
-    // This is a tiny valid DDNet map with no tiles
-    // In production, load the actual map file from disk based on the teehistorian header
+/// Load a map from the maps directory and optionally verify its hash
+fn load_map_from_dir(
+    maps_dir: &Path,
+    map_name: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Vec<u8>> {
+    // Construct the map file path
+    let map_path = maps_dir.join(format!("{}.map", map_name));
 
-    // For now, return an error directing users to provide the map
-    // TODO: Either embed a minimal map binary or generate one properly
-    Err(anyhow::anyhow!(
-        "Map creation not yet implemented. Please provide the actual map file.\n\
-         You can load maps using the map_name from the teehistorian header."
-    ))
+    // Load the map file
+    let map_data = std::fs::read(&map_path)
+        .with_context(|| format!("Failed to load map from: {}", map_path.display()))?;
 
-    // Alternative: If users have a minimal.map file, they could load it:
-    // std::fs::read("path/to/minimal.map").context("Failed to load minimal map")
+    // Verify SHA256 hash if provided in the teehistorian header
+    if let Some(expected_hash) = expected_sha256 {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&map_data);
+        let actual_hash = format!("{:x}", hasher.finalize());
+
+        if actual_hash != expected_hash {
+            anyhow::bail!(
+                "Map hash mismatch for {}:\n  Expected: {}\n  Actual:   {}",
+                map_name,
+                expected_hash,
+                actual_hash
+            );
+        }
+    }
+
+    Ok(map_data)
 }
 
 /// Write player sequences to HDF5 file
 pub fn write_hdf5(sequences: &[PlayerSequence], output_path: &Path) -> Result<()> {
+    use ndarray::Array2;
+
     let file = hdf5::File::create(output_path)
         .with_context(|| format!("Failed to create HDF5 file: {}", output_path.display()))?;
 
@@ -218,13 +318,14 @@ pub fn write_hdf5(sequences: &[PlayerSequence], output_path: &Path) -> Result<()
 
         // Write sequential data as 2D array [ticks × 4]
         let n_ticks = seq.data.len();
-        let mut data_array = vec![0.0f32; n_ticks * 4];
 
+        // Create a proper 2D array using ndarray
+        let mut data_array = Array2::<f32>::zeros((n_ticks, 4));
         for (i, tick_data) in seq.data.iter().enumerate() {
-            data_array[i * 4 + 0] = tick_data.pos_x;
-            data_array[i * 4 + 1] = tick_data.pos_y;
-            data_array[i * 4 + 2] = tick_data.aim_angle;
-            data_array[i * 4 + 3] = tick_data.freeze_status;
+            data_array[[i, 0]] = tick_data.pos_x;
+            data_array[[i, 1]] = tick_data.pos_y;
+            data_array[[i, 2]] = tick_data.aim_angle;
+            data_array[[i, 3]] = tick_data.freeze_status;
         }
 
         let dataset = group
@@ -242,8 +343,13 @@ pub fn write_hdf5(sequences: &[PlayerSequence], output_path: &Path) -> Result<()
         let team_attr = group.new_attr::<i32>().create("team")?;
         team_attr.write_scalar(&seq.team)?;
 
-        let finished_attr = group.new_attr::<i32>().create("finished")?;
-        finished_attr.write_scalar(&(seq.finished as i32))?;
+        // Write finish info (use -1 as sentinel for no finish)
+        let finish_tick_attr = group.new_attr::<i64>().create("finish_tick")?;
+        finish_tick_attr.write_scalar(&seq.finish.as_ref().map(|f| f.tick).unwrap_or(-1))?;
+
+        let finish_duration_attr = group.new_attr::<f32>().create("finish_duration_secs")?;
+        finish_duration_attr
+            .write_scalar(&seq.finish.as_ref().map(|f| f.duration_secs).unwrap_or(-1.0))?;
 
         let start_attr = group.new_attr::<i64>().create("start_tick")?;
         start_attr.write_scalar(&seq.start_tick)?;
