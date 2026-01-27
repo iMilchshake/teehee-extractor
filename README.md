@@ -1,16 +1,6 @@
-# Teehistorian Extractor
+# teehee-extractor
 
-A Rust crate for extracting sequences of player input data from DDNet teehistorian log files and converting them into HDF5 datasets.
-
-## Features
-
-- **Parallel Processing**: Multi-threaded file parsing using rayon
-- **AFK Detection**: Automatically removes idle periods where players aren't moving
-- **Sequence Chunking**: Splits gameplay into fixed-length windows for consistent input shapes
-- **Player Filtering**: Process only specific players by name
-- **Batch Processing**: Memory-efficient processing of large replay collections
-- **HDF5 Export**: Scientific data format with CSV metadata for easy loading
-
+**teehee-extractor** is a Rust crate that extracts sequences of player input data from DDNet teehistorian log files and writes them to HDF5 for easy interoperability across languages. Active gameplay segments are split into fixed-length sequences to ensure consistent tensor shapes suitable for machine learning pipelines. It supports parallel processing and memory-efficient batch processing to handle large collections of teehistorian files.
 
 ## Basic Usage
 
@@ -40,31 +30,15 @@ cargo run --release -- -i ./teehistorian/ -o ./dataset/
 | `-d, --dry-run` | Parse files without writing output | `false` |
 | `-l, --log-level` | Logging verbosity (error/warn/info/debug/trace) | `info` |
 
-### Examples
-
-```bash
-# Process with 8 threads, 2000-tick sequences
-cargo run --release -- -i ./replays/ -o ./out/ -s 2000 -j 8
-
-# Only extract data for specific players
-cargo run --release -- -i ./replays/ -o ./out/ -f "Player1,Player2,Player3"
-
-# Cut sequences on death, useful for training death-prediction models
-cargo run --release -- -i ./replays/ -o ./out/ -k
-
-# Dry run to see statistics without writing files
-cargo run --release -- -i ./replays/ -d -p 20
-```
-
 ## Output Format
 
 The tool produces two files in the output directory:
 
 ### `sequences.h5`
 HDF5 dataset with shape `(num_sequences, seq_length, num_features)` containing:
-- `move_dir`: Ternary movement direction (-1, 0, 1)
-- `jump`, `fire`, `hook`: Binary button states (0.0 or 1.0)
-- `vel_x`, `vel_y`: Player velocity 
+- `move_dir`: movement direction (-1.0, 0.0, 1.0)
+- `jump`, `fire`, `hook`: binary button states (0.0 or 1.0)
+- `vel_x`, `vel_y`: Player velocity
 - `aim_angle`: Cursor angle in degrees
 - `aim_distance`: Distance to cursor
 
@@ -74,3 +48,11 @@ Metadata for each sequence:
 seq_id,player_id,player,start,ticks,map,teehist
 ...
 ```
+
+## Current Limitations
+
+- Memory usage spikes are consistent and proportional to batch size. However, there is a gradual increase in memory over time despite this, which might lead to OOM problems when processing very large collections of teehistorian files (50GB+). For now, consider increasing swap if this is an issue.
+- Most relevant teehistorian chunk types are supported. Some rarely-used ones are not yet implemented.
+- Sequences are extracted at fixed length to ensure uniform tensor shapes.
+
+All of these will be addressed in future releases.

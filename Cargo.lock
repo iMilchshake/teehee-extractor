@@ -1992,6 +1992,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "teehee-extractor"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "clap",
+ "colog",
+ "derivative",
+ "env_logger",
+ "hdf5-metno",
+ "log 0.4.22",
+ "ndarray",
+ "ndarray-npy",
+ "num_cpus",
+ "parquet",
+ "plotlib",
+ "rayon",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "teehistorian 0.10.5",
+ "thiserror",
+ "twgame-core",
+]
+
+[[package]]
 name = "teehistorian"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2015,31 +2040,6 @@ dependencies = [
  "serde",
  "serde_bytes",
  "uuid 1.11.0",
-]
-
-[[package]]
-name = "teehistorian_extractor"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "clap",
- "colog",
- "derivative",
- "env_logger",
- "hdf5-metno",
- "log 0.4.22",
- "ndarray",
- "ndarray-npy",
- "num_cpus",
- "parquet",
- "plotlib",
- "rayon",
- "rmp-serde",
- "serde",
- "serde_json",
- "teehistorian 0.10.5",
- "thiserror",
- "twgame-core",
 ]
 
 [[package]]

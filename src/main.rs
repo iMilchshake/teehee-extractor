@@ -4,9 +4,8 @@ use log::LevelFilter;
 use rayon::ThreadPoolBuilder;
 use std::fs;
 use std::path::PathBuf;
-use teehistorian_extractor::export::ExportConfig;
-use teehistorian_extractor::export::Exporter;
-use teehistorian_extractor::parser::ParserConfig;
+use teehee_extractor::export::{ExportConfig, Exporter};
+use teehee_extractor::parser::ParserConfig;
 
 #[derive(Parser, Debug)]
 struct Cli {
