@@ -232,8 +232,9 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
     let replayer = ThReplayer::new(header_raw, &mut world);
     replayer.validate(&mut world, &mut th_stream, Some(&mut data_writer));
 
-    // Extract finish information from the world wrapper
+    // Extract finish information and player names from the world wrapper
     let finishes = world.finishes;
+    let player_names = world.player_names;
 
     // Convert captured data to PlayerSequence
     let time_of_day = start_time;
@@ -244,12 +245,19 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
             let start_tick = data.first().map(|d| d.tick).unwrap_or(0);
             let end_tick = data.last().map(|d| d.tick).unwrap_or(0);
 
-            // Get player info (name and team)
-            let (player_name, team) = data_writer
-                .player_info
+            // Get player name from net messages (ClStartInfo), fall back to snap data or placeholder
+            let player_name = player_names
                 .get(&player_id)
                 .cloned()
-                .unwrap_or_else(|| (format!("player_{}", player_id), 0));
+                .or_else(|| data_writer.player_info.get(&player_id).map(|(n, _)| n.clone()))
+                .unwrap_or_else(|| format!("player_{}", player_id));
+
+            // Get team from snap data
+            let team = data_writer
+                .player_info
+                .get(&player_id)
+                .map(|(_, t)| *t)
+                .unwrap_or(0);
 
             // Look up finish info for this player
             let finish = finishes.get(&player_name).cloned();
