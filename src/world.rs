@@ -14,9 +14,6 @@ use twgame::DdnetReplayerWorld;
 pub struct World {
     pub world: DdnetReplayerWorld,
     pub finishes: HashMap<String, FinishInfo>,
-    pub player_names: HashMap<u32, String>, // player slot id -> name
-    player_count: u32,
-    snap_with_players_count: u64,
 }
 
 impl World {
@@ -24,9 +21,6 @@ impl World {
         Self {
             world,
             finishes: HashMap::new(),
-            player_names: HashMap::new(),
-            player_count: 0,
-            snap_with_players_count: 0,
         }
     }
 }
@@ -34,7 +28,6 @@ impl World {
 // Implement Game trait (forward all methods to inner world)
 impl Game for World {
     fn player_join(&mut self, id: u32) {
-        self.player_count += 1;
         self.world.player_join(id);
     }
 
@@ -47,17 +40,10 @@ impl Game for World {
     }
 
     fn player_leave(&mut self, id: u32) {
-        self.player_count -= 1;
         self.world.player_leave(id);
     }
 
     fn on_net_msg(&mut self, id: u32, msg: &ClNetMessage) {
-        // Capture player name from ClStartInfo
-        if let ClNetMessage::ClStartInfo(info) = msg {
-            let name = String::from_utf8_lossy(info.name).to_string();
-            println!("  Player {} joined: {}", id, name);
-            self.player_names.insert(id, name);
-        }
         self.world.on_net_msg(id, msg);
     }
 

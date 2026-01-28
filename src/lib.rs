@@ -13,7 +13,6 @@ use teehistorian_replayer::twgame_core::twsnap::time::Instant;
 use teehistorian_replayer::twgame_core::twsnap::Snap;
 use teehistorian_replayer::twgame_core::Snapper;
 use teehistorian_replayer::ThReplayer;
-use twgame::twsnap::SnapId;
 use twgame::{DdnetReplayerWorld, Map, ThHeader};
 use world::World;
 
@@ -112,31 +111,20 @@ impl DemoWrite<World> for DataCapturingWriter {
 
         let mut seen_this_tick = std::collections::HashSet::new();
         for (snap_id, player) in snap_buf.players.iter() {
-            if !player.name.is_empty() {
-                self.player_info.entry(snap_id.0).or_insert_with(|| {
-                    println!(
-                        "tick={} getting player name for snap_id={}, name={}",
-                        tick, snap_id.0, player.name
-                    );
-                    (player.name.to_string(), player.team)
-                });
-            }
-
-            // dbg!(&snap_id.0, &player);
             seen_this_tick.insert(snap_id.0);
 
+            // Update player info: always update if name is non-empty, otherwise insert placeholder
             match self.player_info.entry(snap_id.0) {
-                std::collections::hash_map::Entry::Vacant(_) => {
-                    println!("tick={}, new snap id = {}", &tick, snap_id.0);
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((player.name.to_string(), player.team));
                 }
-                std::collections::hash_map::Entry::Occupied(o) => {
-                    // nothing
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    // Update name if we now have one and didn't before
+                    if !player.name.is_empty() && o.get().0.is_empty() {
+                        o.get_mut().0 = player.name.to_string();
+                    }
                 }
             }
-
-            self.player_info
-                .entry(snap_id.0)
-                .or_insert_with(|| (player.name.to_string(), player.team));
 
             // dbg!(&self.player_info);
 
@@ -232,9 +220,8 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
     let replayer = ThReplayer::new(header_raw, &mut world);
     replayer.validate(&mut world, &mut th_stream, Some(&mut data_writer));
 
-    // Extract finish information and player names from the world wrapper
+    // Extract finish information from the world wrapper
     let finishes = world.finishes;
-    let player_names = world.player_names;
 
     // Convert captured data to PlayerSequence
     let time_of_day = start_time;
@@ -245,19 +232,12 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
             let start_tick = data.first().map(|d| d.tick).unwrap_or(0);
             let end_tick = data.last().map(|d| d.tick).unwrap_or(0);
 
-            // Get player name from net messages (ClStartInfo), fall back to snap data or placeholder
-            let player_name = player_names
-                .get(&player_id)
-                .cloned()
-                .or_else(|| data_writer.player_info.get(&player_id).map(|(n, _)| n.clone()))
-                .unwrap_or_else(|| format!("player_{}", player_id));
-
-            // Get team from snap data
-            let team = data_writer
+            // Get player info from snap data
+            let (player_name, team) = data_writer
                 .player_info
                 .get(&player_id)
-                .map(|(_, t)| *t)
-                .unwrap_or(0);
+                .cloned()
+                .unwrap_or_else(|| (format!("player_{}", player_id), 0));
 
             // Look up finish info for this player
             let finish = finishes.get(&player_name).cloned();
