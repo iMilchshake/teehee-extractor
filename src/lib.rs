@@ -1,6 +1,7 @@
 mod world;
 
 use anyhow::{Context, Result};
+use core::panic;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
@@ -12,6 +13,7 @@ use teehistorian_replayer::twgame_core::twsnap::time::Instant;
 use teehistorian_replayer::twgame_core::twsnap::Snap;
 use teehistorian_replayer::twgame_core::Snapper;
 use teehistorian_replayer::ThReplayer;
+use twgame::twsnap::SnapId;
 use twgame::{DdnetReplayerWorld, Map, ThHeader};
 use world::World;
 
@@ -51,6 +53,8 @@ struct DataCapturingWriter {
     player_info: HashMap<u32, (String, i32)>, // (name, team)
     current_tick: i64,
     snap_count: u64,
+
+    start_tick: HashMap<u32, i64>,
 }
 
 impl DataCapturingWriter {
@@ -60,6 +64,7 @@ impl DataCapturingWriter {
             player_info: HashMap::new(),
             current_tick: 0,
             snap_count: 0,
+            start_tick: HashMap::new(),
         }
     }
 }
@@ -75,61 +80,14 @@ impl DemoChatWrite for DataCapturingWriter {
     }
 }
 
-// Implement DemoWrite for DdnetReplayerWorld to capture game state at each tick
 impl DemoWrite<DdnetReplayerWorld> for DataCapturingWriter {
     fn snap_and_write(
         &mut self,
-        tick: Instant,
-        world: &DdnetReplayerWorld,
-        snap_buf: &mut Snap,
+        _tick: Instant,
+        _world: &DdnetReplayerWorld,
+        _snap_buf: &mut Snap,
     ) -> Result<(), WriteError> {
-        self.snap_count += 1;
-
-        // Convert Instant to tick number
-        self.current_tick = tick.snap_tick() as i64;
-
-        // Clear the snapshot buffer before populating it
-        snap_buf.clear();
-
-        // IMPORTANT: Populate the snapshot buffer from the world state
-        world.snap(snap_buf);
-
-        dbg!("hi");
-
-        // Extract player/tee data from the snapshot
-        // The snapshot contains all game state including positions, angles, and freeze status
-        for (snap_id, player) in snap_buf.players.iter() {
-            dbg!(&player);
-            // Store player info (name and team)
-            self.player_info
-                .entry(snap_id.0)
-                .or_insert_with(|| (player.name.to_string(), player.team));
-
-            if let Some(tee) = &player.tee {
-                // Extract aim angle (already in radians)
-                let aim_angle = tee.angle.to_num::<f32>();
-
-                // Determine freeze status (frozen if freeze_end > current tick)
-                let is_frozen = tee.freeze_end > tick;
-                let freeze_status = if is_frozen { 1.0 } else { 0.0 };
-
-                let tick_data = TickData {
-                    tick: self.current_tick,
-                    pos_x: tee.pos.x.to_num::<f32>(),
-                    pos_y: tee.pos.y.to_num::<f32>(),
-                    aim_angle,
-                    freeze_status,
-                };
-
-                // Use snap_id as player identifier
-                self.sequences
-                    .entry(snap_id.0)
-                    .or_insert_with(Vec::new)
-                    .push(tick_data);
-            }
-        }
-
-        Ok(())
+        panic!("not implemented!");
     }
 
     fn chat(&mut self) -> &mut (dyn DemoChatWrite + 'static) {
@@ -146,20 +104,41 @@ impl DemoWrite<World> for DataCapturingWriter {
         snap_buf: &mut Snap,
     ) -> Result<(), WriteError> {
         self.snap_count += 1;
-
-        // Same logic as DdnetReplayerWorld implementation
         self.current_tick = tick.snap_tick() as i64;
 
-        // Clear the snapshot buffer before populating it
+        // prepare snap buffer / world
         snap_buf.clear();
-
-        // IMPORTANT: Populate the snapshot buffer from the world state
         world.snap(snap_buf);
 
+        let mut seen_this_tick = std::collections::HashSet::new();
         for (snap_id, player) in snap_buf.players.iter() {
+            if !player.name.is_empty() {
+                self.player_info.entry(snap_id.0).or_insert_with(|| {
+                    println!(
+                        "tick={} getting player name for snap_id={}, name={}",
+                        tick, snap_id.0, player.name
+                    );
+                    (player.name.to_string(), player.team)
+                });
+            }
+
+            // dbg!(&snap_id.0, &player);
+            seen_this_tick.insert(snap_id.0);
+
+            match self.player_info.entry(snap_id.0) {
+                std::collections::hash_map::Entry::Vacant(_) => {
+                    println!("tick={}, new snap id = {}", &tick, snap_id.0);
+                }
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    // nothing
+                }
+            }
+
             self.player_info
                 .entry(snap_id.0)
                 .or_insert_with(|| (player.name.to_string(), player.team));
+
+            // dbg!(&self.player_info);
 
             if let Some(tee) = &player.tee {
                 let aim_angle = tee.angle.to_num::<f32>();
@@ -179,6 +158,28 @@ impl DemoWrite<World> for DataCapturingWriter {
                     .or_insert_with(Vec::new)
                     .push(tick_data);
             }
+        }
+
+        for id in &seen_this_tick {
+            self.start_tick.entry(*id).or_insert(self.current_tick);
+        }
+        // 3) finish runs for ids that disappeared
+        let mut finished = Vec::new();
+        for (id, start) in self.start_tick.iter() {
+            if !seen_this_tick.contains(id) {
+                println!(
+                    "id={}: [{}, {}], name={}",
+                    id,
+                    start,
+                    self.current_tick - 1,
+                    self.player_info.get(id).unwrap().0
+                );
+                finished.push(*id);
+            }
+        }
+
+        for id in finished {
+            self.start_tick.remove(&id);
         }
 
         Ok(())

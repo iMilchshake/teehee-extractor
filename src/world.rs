@@ -12,7 +12,7 @@ use twgame::DdnetReplayerWorld;
 
 /// Wrapper around DdnetReplayerWorld that provides hooks for tracking game events
 pub struct World {
-    world: DdnetReplayerWorld,
+    pub world: DdnetReplayerWorld,
     pub finishes: HashMap<String, FinishInfo>,
     player_count: u32,
     snap_with_players_count: u64,
@@ -106,7 +106,12 @@ impl teehistorian_replayer::twgame_core::replay::ReplayerChecker for World {
         self.world.on_finish(now, finish);
     }
 
-    fn check_tees(&mut self, cur_time: Instant, tees: &[Option<ReplayerTeeInfo>], demo: DemoChatPtr) {
+    fn check_tees(
+        &mut self,
+        cur_time: Instant,
+        tees: &[Option<ReplayerTeeInfo>],
+        demo: DemoChatPtr,
+    ) {
         self.world.check_tees(cur_time, tees, demo);
     }
 
