@@ -46,24 +46,36 @@ pub struct PlayerSequence {
     pub data: Vec<TickData>,
 }
 
+/// Completed sequence ready to be written
+struct FinishedSequence {
+    player_name: String,
+    team: i32,
+    data: Vec<TickData>,
+}
+
 /// Custom demo writer that captures game state instead of writing to file
 struct DataCapturingWriter {
-    sequences: HashMap<u32, Vec<TickData>>,
-    player_info: HashMap<u32, (String, i32)>, // (name, team)
+    // Active sequences (keyed by snap_id, which is a reusable server slot)
+    active_sequences: HashMap<u32, Vec<TickData>>,
+    active_player_info: HashMap<u32, (String, i32)>, // (name, team)
+    start_tick: HashMap<u32, i64>,
+
+    // Completed sequences (moved here when player leaves)
+    finished_sequences: Vec<FinishedSequence>,
+
     current_tick: i64,
     snap_count: u64,
-
-    start_tick: HashMap<u32, i64>,
 }
 
 impl DataCapturingWriter {
     fn new() -> Self {
         Self {
-            sequences: HashMap::new(),
-            player_info: HashMap::new(),
+            active_sequences: HashMap::new(),
+            active_player_info: HashMap::new(),
+            start_tick: HashMap::new(),
+            finished_sequences: Vec::new(),
             current_tick: 0,
             snap_count: 0,
-            start_tick: HashMap::new(),
         }
     }
 }
@@ -113,8 +125,11 @@ impl DemoWrite<World> for DataCapturingWriter {
         for (snap_id, player) in snap_buf.players.iter() {
             seen_this_tick.insert(snap_id.0);
 
-            // Update player info: always update if name is non-empty, otherwise insert placeholder
-            match self.player_info.entry(snap_id.0) {
+            // NOTE: snap_id is a server slot that gets reused. When a player leaves, we move
+            // their sequence to finished_sequences and clear their info, so the next player
+            // using that slot gets a fresh entry.
+            // Within a session, we keep the first non-empty name seen (name may arrive late).
+            match self.active_player_info.entry(snap_id.0) {
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert((player.name.to_string(), player.team));
                 }
@@ -125,8 +140,6 @@ impl DemoWrite<World> for DataCapturingWriter {
                     }
                 }
             }
-
-            // dbg!(&self.player_info);
 
             if let Some(tee) = &player.tee {
                 let aim_angle = tee.angle.to_num::<f32>();
@@ -141,7 +154,7 @@ impl DemoWrite<World> for DataCapturingWriter {
                     freeze_status,
                 };
 
-                self.sequences
+                self.active_sequences
                     .entry(snap_id.0)
                     .or_insert_with(Vec::new)
                     .push(tick_data);
@@ -151,23 +164,39 @@ impl DemoWrite<World> for DataCapturingWriter {
         for id in &seen_this_tick {
             self.start_tick.entry(*id).or_insert(self.current_tick);
         }
-        // 3) finish runs for ids that disappeared
-        let mut finished = Vec::new();
+        // Finish sequences for ids that disappeared (player left or died)
+        let mut finished_ids = Vec::new();
         for (id, start) in self.start_tick.iter() {
             if !seen_this_tick.contains(id) {
+                let (name, _team) = self
+                    .active_player_info
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("player_{}", id), 0));
                 println!(
                     "id={}: [{}, {}], name={}",
-                    id,
-                    start,
-                    self.current_tick - 1,
-                    self.player_info.get(id).unwrap().0
+                    id, start, self.current_tick - 1, name
                 );
-                finished.push(*id);
+                finished_ids.push(*id);
             }
         }
 
-        for id in finished {
+        // Move finished sequences to the completed list
+        for id in finished_ids {
             self.start_tick.remove(&id);
+
+            let (player_name, team) = self
+                .active_player_info
+                .remove(&id)
+                .unwrap_or_else(|| (format!("player_{}", id), 0));
+
+            if let Some(data) = self.active_sequences.remove(&id) {
+                self.finished_sequences.push(FinishedSequence {
+                    player_name,
+                    team,
+                    data,
+                });
+            }
         }
 
         Ok(())
@@ -225,35 +254,53 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
 
     // Convert captured data to PlayerSequence
     let time_of_day = start_time;
-    let sequences: Vec<PlayerSequence> = data_writer
-        .sequences
+
+    // Start with finished sequences (players who left during replay)
+    let mut sequences: Vec<PlayerSequence> = data_writer
+        .finished_sequences
         .into_iter()
-        .map(|(player_id, data)| {
-            let start_tick = data.first().map(|d| d.tick).unwrap_or(0);
-            let end_tick = data.last().map(|d| d.tick).unwrap_or(0);
-
-            // Get player info from snap data
-            let (player_name, team) = data_writer
-                .player_info
-                .get(&player_id)
-                .cloned()
-                .unwrap_or_else(|| (format!("player_{}", player_id), 0));
-
-            // Look up finish info for this player
-            let finish = finishes.get(&player_name).cloned();
+        .map(|seq| {
+            let start_tick = seq.data.first().map(|d| d.tick).unwrap_or(0);
+            let end_tick = seq.data.last().map(|d| d.tick).unwrap_or(0);
+            let finish = finishes.get(&seq.player_name).cloned();
 
             PlayerSequence {
-                player_name,
-                team,
+                player_name: seq.player_name,
+                team: seq.team,
                 finish,
                 start_tick,
                 end_tick,
                 time_of_day: time_of_day.clone(),
                 map_name: map_name.clone(),
-                data,
+                data: seq.data,
             }
         })
         .collect();
+
+    // Add any still-active sequences (players still in game at end of replay)
+    for (player_id, data) in data_writer.active_sequences {
+        let start_tick = data.first().map(|d| d.tick).unwrap_or(0);
+        let end_tick = data.last().map(|d| d.tick).unwrap_or(0);
+
+        let (player_name, team) = data_writer
+            .active_player_info
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_else(|| (format!("player_{}", player_id), 0));
+
+        let finish = finishes.get(&player_name).cloned();
+
+        sequences.push(PlayerSequence {
+            player_name,
+            team,
+            finish,
+            start_tick,
+            end_tick,
+            time_of_day: time_of_day.clone(),
+            map_name: map_name.clone(),
+            data,
+        });
+    }
 
     Ok(sequences)
 }
@@ -325,9 +372,9 @@ pub fn write_hdf5(sequences: &[PlayerSequence], output_path: &Path) -> Result<()
 
         // Write metadata as attributes
         let player_name_attr = group
-            .new_attr::<hdf5::types::VarLenAscii>()
+            .new_attr::<hdf5::types::VarLenUnicode>()
             .create("player_name")?;
-        player_name_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(&seq.player_name)?)?;
+        player_name_attr.write_scalar(&seq.player_name.parse::<hdf5::types::VarLenUnicode>().unwrap())?;
 
         let team_attr = group.new_attr::<i32>().create("team")?;
         team_attr.write_scalar(&seq.team)?;
