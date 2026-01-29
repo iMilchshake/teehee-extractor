@@ -1,53 +1,109 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use teehee_extractor::features::{Feature, FeatureSet};
 use teehee_extractor::{extract_sequences, write_hdf5};
 
 /// Extract player sequences from DDNet teehistorian files to HDF5 format
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Input teehistorian file path
-    #[arg(short, long)]
-    input: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Output HDF5 file path
-    #[arg(short, long)]
-    output: PathBuf,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Extract sequences from a teehistorian file
+    Extract {
+        /// Input teehistorian file path
+        #[arg(short, long)]
+        input: PathBuf,
 
-    /// Directory containing map files (.map)
-    #[arg(short, long)]
-    maps_dir: PathBuf,
+        /// Output HDF5 file path
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Directory containing map files (.map)
+        #[arg(short, long)]
+        maps_dir: PathBuf,
+
+        /// Features to extract (comma-separated). Can use group names or individual features.
+        /// Groups: position, velocity, cursor, aim, movement, inputs, state, hook, weapons, jumps
+        /// Default: all features
+        #[arg(short, long)]
+        features: Option<String>,
+    },
+    /// List all available features and groups
+    ListFeatures,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    println!("Extracting sequences from: {}", args.input.display());
+    match args.command {
+        Command::ListFeatures => {
+            println!("Available feature groups:");
+            for group in Feature::groups() {
+                let features: Vec<_> = Feature::in_group(group).iter().map(|f| f.name()).collect();
+                println!("  {}: {}", group, features.join(", "));
+            }
+            println!(
+                "\nAll features: {}",
+                Feature::all()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Command::Extract {
+            input,
+            output,
+            maps_dir,
+            features,
+        } => {
+            // parse feature selection
+            let feature_set = match &features {
+                Some(spec) => FeatureSet::from_spec(spec).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }),
+                None => FeatureSet::all(),
+            };
 
-    let sequences = extract_sequences(&args.input, &args.maps_dir)?;
+            println!("Extracting sequences from: {}", input.display());
+            println!(
+                "Selected features ({}): {}",
+                feature_set.len(),
+                feature_set.names().join(", ")
+            );
 
-    println!("Found {} player sequences", sequences.len());
+            let sequences = extract_sequences(&input, &maps_dir)?;
 
-    for (idx, seq) in sequences.iter().enumerate() {
-        let finish_info = match &seq.finish {
-            Some(f) => format!("finished at tick {} in {:.2}s", f.tick, f.duration_secs),
-            None => "did not finish".to_string(),
-        };
-        println!(
-            "  Sequence {}: {} ({} ticks, team {}, {})",
-            idx,
-            seq.player_name,
-            seq.data.len(),
-            seq.team,
-            finish_info
-        );
+            println!("Found {} player sequences", sequences.len());
+
+            for (idx, seq) in sequences.iter().enumerate() {
+                let finish_info = match &seq.finish {
+                    Some(f) => format!("finished at tick {} in {:.2}s", f.tick, f.duration_secs),
+                    None => "did not finish".to_string(),
+                };
+                println!(
+                    "  Sequence {}: {} ({} ticks, team {}, {})",
+                    idx,
+                    seq.player_name,
+                    seq.data.len(),
+                    seq.team,
+                    finish_info
+                );
+            }
+
+            println!("Writing to HDF5: {}", output.display());
+            write_hdf5(&sequences, &output, &feature_set)?;
+
+            println!("Done!");
+        }
     }
-
-    println!("Writing to HDF5: {}", args.output.display());
-    write_hdf5(&sequences, &args.output)?;
-
-    println!("Done!");
 
     Ok(())
 }
