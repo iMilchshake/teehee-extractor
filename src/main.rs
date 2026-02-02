@@ -84,9 +84,11 @@ fn main() -> Result<()> {
             println!("Found {} player sequences", sequences.len());
 
             for (idx, seq) in sequences.iter().enumerate() {
-                let finish_info = match &seq.finish {
-                    Some(f) => format!("finished at tick {} in {:.2}s", f.tick, f.duration_secs),
-                    None => "did not finish".to_string(),
+                let finish_info = if seq.finishes.is_empty() {
+                    "did not finish".to_string()
+                } else {
+                    let times: Vec<String> = seq.finishes.iter().map(|f| format!("{:.2}s", f.duration_secs)).collect();
+                    format!("{} finish(es): {}", seq.finishes.len(), times.join(", "))
                 };
                 println!(
                     "  Sequence {}: {} ({} ticks, team {}, {})",
@@ -96,6 +98,7 @@ fn main() -> Result<()> {
                     seq.team,
                     finish_info
                 );
+                dbg!(&seq);
             }
 
             println!("Writing to HDF5: {}", output.display());

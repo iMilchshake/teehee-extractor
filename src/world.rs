@@ -1,5 +1,6 @@
-use crate::sequence::FinishInfo;
-use std::collections::{HashMap, HashSet};
+use crate::sequence::{FinishInfo, TickData};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use teehistorian_replayer::twgame_core::console::Command;
 use teehistorian_replayer::twgame_core::database::Finishes;
 use teehistorian_replayer::twgame_core::net_msg::ClNetMessage;
@@ -8,7 +9,6 @@ use teehistorian_replayer::twgame_core::teehistorian::Chunk;
 use teehistorian_replayer::twgame_core::twsnap::time::Instant;
 use teehistorian_replayer::twgame_core::twsnap::Snap;
 use teehistorian_replayer::twgame_core::{Game, Input, Snapper};
-use twgame::core::net_msg::Team;
 use twgame::twsnap::time::SnapTick;
 use twgame::DdnetReplayerWorld;
 
@@ -36,24 +36,35 @@ impl From<&Input> for InputState {
     }
 }
 
+/// Tracks all data for an active player during replay
+#[derive(Debug, Clone)]
+pub struct TrackedPlayer {
+    pub player_id: u32,
+    pub name: String,
+    pub team: i32,
+    pub input: Option<InputState>,
+    pub data: Vec<TickData>,
+    pub timeout_code: Option<String>,
+    pub finishes: Vec<FinishInfo>,
+}
+
 /// Wrapper around DdnetReplayerWorld that provides hooks for tracking game events
 pub struct World {
     pub world: DdnetReplayerWorld,
-    pub finishes: HashMap<String, FinishInfo>,
-    pub player_inputs: HashMap<u32, InputState>,
     pub current_tick: SnapTick,
-    /// Players who are active (between player_ready and player_leave)
-    pub active_players: HashSet<u32>,
+    /// Active players (between player_ready and player_leave)
+    pub tracked_players: RefCell<HashMap<u32, TrackedPlayer>>,
+    /// Completed player sequences (after player_leave)
+    pub completed_players: RefCell<Vec<TrackedPlayer>>,
 }
 
 impl World {
     pub fn new(world: DdnetReplayerWorld) -> Self {
         Self {
             world,
-            finishes: HashMap::new(),
-            player_inputs: HashMap::new(),
             current_tick: SnapTick::default(),
-            active_players: HashSet::new(),
+            tracked_players: RefCell::new(HashMap::new()),
+            completed_players: RefCell::new(Vec::new()),
         }
     }
 }
@@ -62,40 +73,39 @@ impl World {
 impl Game for World {
     fn player_join(&mut self, id: u32) {
         self.world.player_join(id);
-        println!("tick={} id={}: JOIN", self.current_tick, id);
     }
 
     fn player_ready(&mut self, id: u32) {
-        self.active_players.insert(id);
+        self.tracked_players.borrow_mut().insert(
+            id,
+            TrackedPlayer {
+                player_id: id,
+                name: String::new(),
+                team: 0,
+                input: None,
+                data: Vec::new(),
+                timeout_code: None,
+                finishes: Vec::new(),
+            },
+        );
         self.world.player_ready(id);
-        println!("tick={} id={}: READY", self.current_tick, id);
     }
 
-    // TODO: this is not called every tick. I believe this is only called if input changes. So its
-    // correct to buffer inputs in self.player_inputs, and re-use in future ticks as they do not change.
     fn player_input(&mut self, id: u32, input: &Input) {
-        self.player_inputs.insert(id, InputState::from(input));
+        if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
+            player.input = Some(InputState::from(input));
+        }
         self.world.player_input(id, input);
     }
 
     fn player_leave(&mut self, id: u32) {
-        self.active_players.remove(&id);
-        self.player_inputs.remove(&id);
+        if let Some(player) = self.tracked_players.borrow_mut().remove(&id) {
+            self.completed_players.borrow_mut().push(player);
+        }
         self.world.player_leave(id);
-        println!("tick={} id={}: LEAVE", self.current_tick, id);
     }
 
     fn on_net_msg(&mut self, id: u32, msg: &ClNetMessage) {
-        if let ClNetMessage::ClSetTeam(t) = msg {
-            // TODO: we can use this to determine if players are currently in spec.
-            // while we dont want to extract sequences, we could retain information (e.g. timeout code)
-            let spec = match t {
-                Team::Spectators => true,
-                _ => false,
-            };
-            println!("tick={} id={}, spec={}", self.current_tick, id, spec);
-        }
-
         self.world.on_net_msg(id, msg);
     }
 
@@ -124,11 +134,25 @@ impl teehistorian_replayer::twgame_core::replay::ReplayerChecker for World {
     }
 
     fn on_teehistorian_chunk(&mut self, now: Instant, chunk: &Chunk) {
+        if let Chunk::ConsoleCommand(cmd) = chunk {
+            if cmd.cmd == b"timeout" {
+                if let Some(code) = cmd.args.first() {
+                    if let Ok(code_str) = std::str::from_utf8(code) {
+                        if cmd.cid >= 0 {
+                            if let Some(player) =
+                                self.tracked_players.borrow_mut().get_mut(&(cmd.cid as u32))
+                            {
+                                player.timeout_code = Some(code_str.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         self.world.on_teehistorian_chunk(now, chunk);
     }
 
     fn on_finish(&mut self, now: Instant, finish: &Finishes) {
-        // track the finish event as they are not stored in World
         let duration_ticks = match finish {
             Finishes::FinishTee(f) => f.time.ticks(),
             Finishes::FinishTeam(f) => f.time.ticks(),
@@ -137,13 +161,16 @@ impl teehistorian_replayer::twgame_core::replay::ReplayerChecker for World {
             tick: now.snap_tick() as i64,
             duration_secs: duration_ticks as f32 / 50.0,
         };
-        match finish {
-            Finishes::FinishTee(f) => {
-                self.finishes.insert(f.name.clone(), finish_info);
-            }
-            Finishes::FinishTeam(f) => {
-                for name in &f.names {
-                    self.finishes.insert(name.clone(), finish_info.clone());
+
+        // match finish by current player name
+        let names: Vec<&str> = match finish {
+            Finishes::FinishTee(f) => vec![&f.name],
+            Finishes::FinishTeam(f) => f.names.iter().map(|s| s.as_str()).collect(),
+        };
+        for name in names {
+            for player in self.tracked_players.borrow_mut().values_mut() {
+                if player.name == name {
+                    player.finishes.push(finish_info.clone());
                 }
             }
         }

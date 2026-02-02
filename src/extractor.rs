@@ -1,4 +1,4 @@
-use crate::sequence::{PlayerSequence, TickData};
+use crate::sequence::{compute_active_regions, drop_afk_ticks, PlayerSequence, TickData};
 use crate::world::World;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -16,32 +16,17 @@ use teehistorian_replayer::twgame_core::{replay::DemoWrite, Snapper};
 use teehistorian_replayer::ThReplayer;
 use twgame::{DdnetReplayerWorld, Map, ThHeader};
 
-/// Stores only subset of PlayerSequence data that is used for export.
-struct FinishedSequence {
-    player_name: String,
-    team: i32,
-    data: Vec<TickData>,
-}
-
-/// Custom demo writer that captures game state instead of writing to file.
+/// Captures tick data during replay
 struct DataCapturingWriter {
-    // hashmaps use snap id as key
-    active_sequences: HashMap<u32, Vec<TickData>>,
-    active_player_info: HashMap<u32, (String, i32)>, // (name, team)
-
-    finished_sequences: Vec<FinishedSequence>,
+    tick_data: HashMap<u32, Vec<TickData>>,
     current_tick: i64,
-    snap_count: u64,
 }
 
 impl DataCapturingWriter {
     fn new() -> Self {
         Self {
-            active_sequences: HashMap::new(),
-            active_player_info: HashMap::new(),
-            finished_sequences: Vec::new(),
+            tick_data: HashMap::new(),
             current_tick: 0,
-            snap_count: 0,
         }
     }
 }
@@ -65,45 +50,33 @@ impl DemoWrite<World> for DataCapturingWriter {
         world: &World,
         snap_buf: &mut Snap,
     ) -> Result<(), WriteError> {
-        self.snap_count += 1;
         self.current_tick = tick.snap_tick() as i64;
 
-        // prepare snap buffer / world
         snap_buf.clear();
         world.snap(snap_buf);
 
         for (snap_id, player) in snap_buf.players.iter() {
-            // skip players who joined but aren't ready yet
-            if !world.active_players.contains(&snap_id.0) {
-                assert!(
-                    player.tee.is_none(),
-                    "player {} has tee but not ready",
-                    snap_id.0
-                );
-                continue;
-            }
-
-            match self.active_player_info.entry(snap_id.0) {
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert((player.name.to_string(), player.team));
-                }
-                std::collections::hash_map::Entry::Occupied(mut o) => {
-                    // keep the first non-empty name seen (ignore renames)
-                    if !player.name.is_empty() && o.get().0.is_empty() {
-                        o.get_mut().0 = player.name.to_string();
-                    }
-                }
-            }
-
-            // player is active, so tee must exist
-            let tee = player.tee.as_ref().expect("active player must have tee");
-
-            // skip tick if no input received yet
-            let Some(input) = world.player_inputs.get(&snap_id.0) else {
+            // get tracked player (skip if not ready yet)
+            let mut tracked_players = world.tracked_players.borrow_mut();
+            let Some(tracked) = tracked_players.get_mut(&snap_id.0) else {
+                drop(tracked_players);
+                assert!(player.tee.is_none(), "player {} has tee but not tracked", snap_id.0);
                 continue;
             };
 
-            println!("tick={} id={} snap", self.current_tick, &snap_id.0);
+            // update current name and team in World (for finish matching)
+            tracked.name = player.name.to_string();
+            tracked.team = player.team;
+
+            // player is tracked, so tee must exist
+            let tee = player.tee.as_ref().expect("tracked player must have tee");
+
+            // skip tick if no input received yet
+            let Some(input) = &tracked.input else {
+                continue;
+            };
+            let input = input.clone();
+            drop(tracked_players);
 
             let aim_angle = tee.angle.to_num::<f32>();
             let is_frozen = tee.freeze_end > tick;
@@ -165,32 +138,7 @@ impl DemoWrite<World> for DataCapturingWriter {
                 can_jump: if can_jump { 1.0 } else { 0.0 },
             };
 
-            self.active_sequences
-                .entry(snap_id.0)
-                .or_default()
-                .push(tick_data);
-        }
-
-        // finish sequences for players who left (in active_sequences but not in world.active_players)
-        let finished_ids: Vec<u32> = self
-            .active_sequences
-            .keys()
-            .filter(|id| !world.active_players.contains(id))
-            .copied()
-            .collect();
-        for id in finished_ids {
-            let (player_name, team) = self
-                .active_player_info
-                .remove(&id)
-                .unwrap_or_else(|| (format!("player_{id}"), 0));
-
-            if let Some(data) = self.active_sequences.remove(&id) {
-                self.finished_sequences.push(FinishedSequence {
-                    player_name,
-                    team,
-                    data,
-                });
-            }
+            self.tick_data.entry(snap_id.0).or_default().push(tick_data);
         }
 
         Ok(())
@@ -243,56 +191,47 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
     let replayer = ThReplayer::new(header_raw, &mut world);
     replayer.validate(&mut world, &mut th_stream, Some(&mut data_writer));
 
-    // extract finish information from the world wrapper
-    let finishes = world.finishes;
-
-    // convert captured data to PlayerSequence
-    let time_of_day = start_time;
-
-    // start with finished sequences (players who left during replay)
-    let mut sequences: Vec<PlayerSequence> = data_writer
-        .finished_sequences
+    // combine completed players (left during replay) and still-active players
+    let all_players = world
+        .completed_players
+        .into_inner()
         .into_iter()
-        .map(|seq| {
-            let start_tick = seq.data.first().map(|d| d.tick).unwrap_or(0);
-            let end_tick = seq.data.last().map(|d| d.tick).unwrap_or(0);
-            let finish = finishes.get(&seq.player_name).cloned();
+        .chain(world.tracked_players.into_inner().into_values());
 
-            PlayerSequence {
-                player_name: seq.player_name,
-                team: seq.team,
-                finish,
-                start_tick,
-                end_tick,
-                time_of_day: time_of_day.clone(),
-                map_name: map_name.clone(),
-                data: seq.data,
-            }
-        })
-        .collect();
+    // convert to PlayerSequence
+    let time_of_day = start_time;
+    let mut sequences = Vec::new();
 
-    // add any still-active sequences (players still in game at end of replay)
-    for (player_id, data) in data_writer.active_sequences {
-        let start_tick = data.first().map(|d| d.tick).unwrap_or(0); // TODO: zero makes no sense here
-        let end_tick = data.last().map(|d| d.tick).unwrap_or(0);
+    for mut player in all_players {
+        // merge tick data from DataCapturingWriter
+        if let Some(mut tick_data) = data_writer.tick_data.remove(&player.player_id) {
+            player.data.append(&mut tick_data);
+        }
 
-        let (player_name, team) = data_writer
-            .active_player_info
-            .get(&player_id)
-            .cloned()
-            .unwrap_or_else(|| (format!("player_{player_id}"), 0));
+        assert!(!player.name.is_empty(), "player {} has no name", player.player_id);
 
-        let finish = finishes.get(&player_name).cloned();
+        // skip empty sequences
+        if player.data.is_empty() {
+            continue;
+        }
+
+        let start_tick = player.data.first().map(|d| d.tick).unwrap();
+        let end_tick = player.data.last().map(|d| d.tick).unwrap();
+
+        drop_afk_ticks(&mut player.data);
+        let active_regions = compute_active_regions(&player.data);
 
         sequences.push(PlayerSequence {
-            player_name,
-            team,
-            finish,
+            player_name: player.name,
+            team: player.team,
+            finishes: player.finishes,
             start_tick,
             end_tick,
             time_of_day: time_of_day.clone(),
             map_name: map_name.clone(),
-            data,
+            data: player.data,
+            active_regions,
+            timeout_code: player.timeout_code,
         });
     }
 

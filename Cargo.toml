@@ -21,3 +21,4 @@ clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
 chrono = "0.4"
 sha2 = "0.10"
+derivative = "2.2"

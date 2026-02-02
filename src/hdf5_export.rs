@@ -60,11 +60,18 @@ pub fn write_hdf5(
             .create("map_name")?;
         map_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(&seq.map_name)?)?;
 
-        // write metadata: finish info
-        // finish_tick: game tick when finish occurred, -1 if no finish
-        // NOTE: currently only tracks first finish per player name in a sequence
-        let finish_tick_attr = group.new_attr::<i64>().create("finish_tick")?;
-        finish_tick_attr.write_scalar(&seq.finish.as_ref().map(|f| f.tick).unwrap_or(-1))?;
+        // write finishes as [n_finishes x 2] dataset (tick, duration_secs)
+        let n_finishes = seq.finishes.len();
+        let finishes_dataset = group
+            .new_dataset::<f64>()
+            .shape([n_finishes, 2])
+            .create("finishes")?;
+        let finishes_data: Vec<f64> = seq
+            .finishes
+            .iter()
+            .flat_map(|f| [f.tick as f64, f.duration_secs as f64])
+            .collect();
+        finishes_dataset.write_raw(&finishes_data)?;
 
         // write metadata: tick and time info
         let start_attr = group.new_attr::<i64>().create("start_tick")?;
@@ -77,6 +84,27 @@ pub fn write_hdf5(
             .new_attr::<hdf5::types::VarLenAscii>()
             .create("time_of_day")?;
         time_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(&seq.time_of_day)?)?;
+
+        // write active_regions as [n_regions x 2] dataset
+        let n_regions = seq.active_regions.len();
+        let regions_dataset = group
+            .new_dataset::<u64>()
+            .shape([n_regions, 2])
+            .create("active_regions")?;
+        let regions_data: Vec<u64> = seq
+            .active_regions
+            .iter()
+            .flat_map(|(start, end)| [*start as u64, *end as u64])
+            .collect();
+        regions_dataset.write_raw(&regions_data)?;
+
+        // write timeout_code if present
+        if let Some(ref timeout_code) = seq.timeout_code {
+            let timeout_attr = group
+                .new_attr::<hdf5::types::VarLenAscii>()
+                .create("timeout_code")?;
+            timeout_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(timeout_code)?)?;
+        }
     }
 
     Ok(())
