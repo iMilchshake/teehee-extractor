@@ -1,5 +1,5 @@
 use crate::sequence::FinishInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use teehistorian_replayer::twgame_core::console::Command;
 use teehistorian_replayer::twgame_core::database::Finishes;
 use teehistorian_replayer::twgame_core::net_msg::ClNetMessage;
@@ -8,6 +8,8 @@ use teehistorian_replayer::twgame_core::teehistorian::Chunk;
 use teehistorian_replayer::twgame_core::twsnap::time::Instant;
 use teehistorian_replayer::twgame_core::twsnap::Snap;
 use teehistorian_replayer::twgame_core::{Game, Input, Snapper};
+use twgame::core::net_msg::Team;
+use twgame::twsnap::time::SnapTick;
 use twgame::DdnetReplayerWorld;
 
 /// Player input state wrapper around `Input` to reduce memory usage
@@ -39,6 +41,9 @@ pub struct World {
     pub world: DdnetReplayerWorld,
     pub finishes: HashMap<String, FinishInfo>,
     pub player_inputs: HashMap<u32, InputState>,
+    pub current_tick: SnapTick,
+    /// Players who are active (between player_ready and player_leave)
+    pub active_players: HashSet<u32>,
 }
 
 impl World {
@@ -47,6 +52,8 @@ impl World {
             world,
             finishes: HashMap::new(),
             player_inputs: HashMap::new(),
+            current_tick: SnapTick::default(),
+            active_players: HashSet::new(),
         }
     }
 }
@@ -55,23 +62,40 @@ impl World {
 impl Game for World {
     fn player_join(&mut self, id: u32) {
         self.world.player_join(id);
+        println!("tick={} id={}: JOIN", self.current_tick, id);
     }
 
     fn player_ready(&mut self, id: u32) {
+        self.active_players.insert(id);
         self.world.player_ready(id);
+        println!("tick={} id={}: READY", self.current_tick, id);
     }
 
+    // TODO: this is not called every tick. I believe this is only called if input changes. So its
+    // correct to buffer inputs in self.player_inputs, and re-use in future ticks as they do not change.
     fn player_input(&mut self, id: u32, input: &Input) {
         self.player_inputs.insert(id, InputState::from(input));
         self.world.player_input(id, input);
     }
 
     fn player_leave(&mut self, id: u32) {
+        self.active_players.remove(&id);
         self.player_inputs.remove(&id);
         self.world.player_leave(id);
+        println!("tick={} id={}: LEAVE", self.current_tick, id);
     }
 
     fn on_net_msg(&mut self, id: u32, msg: &ClNetMessage) {
+        if let ClNetMessage::ClSetTeam(t) = msg {
+            // TODO: we can use this to determine if players are currently in spec.
+            // while we dont want to extract sequences, we could retain information (e.g. timeout code)
+            let spec = match t {
+                Team::Spectators => true,
+                _ => false,
+            };
+            println!("tick={} id={}, spec={}", self.current_tick, id, spec);
+        }
+
         self.world.on_net_msg(id, msg);
     }
 
@@ -85,6 +109,7 @@ impl Game for World {
 
     fn tick(&mut self, cur_time: Instant) {
         self.world.tick(cur_time);
+        self.current_tick = cur_time.snap_tick();
     }
 
     fn is_empty(&self) -> bool {

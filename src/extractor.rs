@@ -1,5 +1,5 @@
 use crate::sequence::{PlayerSequence, TickData};
-use crate::world::{InputState, World};
+use crate::world::World;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -28,7 +28,6 @@ struct DataCapturingWriter {
     // hashmaps use snap id as key
     active_sequences: HashMap<u32, Vec<TickData>>,
     active_player_info: HashMap<u32, (String, i32)>, // (name, team)
-    start_tick: HashMap<u32, i64>,
 
     finished_sequences: Vec<FinishedSequence>,
     current_tick: i64,
@@ -40,7 +39,6 @@ impl DataCapturingWriter {
         Self {
             active_sequences: HashMap::new(),
             active_player_info: HashMap::new(),
-            start_tick: HashMap::new(),
             finished_sequences: Vec::new(),
             current_tick: 0,
             snap_count: 0,
@@ -50,10 +48,12 @@ impl DataCapturingWriter {
 
 impl DemoChatWrite for DataCapturingWriter {
     fn write_chat(&mut self, _msg: &str) -> Result<(), WriteError> {
+        dbg!("write_chat", _msg);
         Ok(())
     }
 
     fn write_player_chat(&mut self, _player_id: i32, _msg: &str) -> Result<(), WriteError> {
+        dbg!("write_player_chat", _msg);
         Ok(())
     }
 }
@@ -72,9 +72,16 @@ impl DemoWrite<World> for DataCapturingWriter {
         snap_buf.clear();
         world.snap(snap_buf);
 
-        let mut seen_this_tick = std::collections::HashSet::new();
         for (snap_id, player) in snap_buf.players.iter() {
-            seen_this_tick.insert(snap_id.0);
+            // skip players who joined but aren't ready yet
+            if !world.active_players.contains(&snap_id.0) {
+                assert!(
+                    player.tee.is_none(),
+                    "player {} has tee but not ready",
+                    snap_id.0
+                );
+                continue;
+            }
 
             match self.active_player_info.entry(snap_id.0) {
                 std::collections::hash_map::Entry::Vacant(v) => {
@@ -88,108 +95,90 @@ impl DemoWrite<World> for DataCapturingWriter {
                 }
             }
 
-            if let Some(tee) = &player.tee {
-                let aim_angle = tee.angle.to_num::<f32>();
-                let is_frozen = tee.freeze_end > tick;
-                let freeze_status = if is_frozen { 1.0 } else { 0.0 };
+            // player is active, so tee must exist
+            let tee = player.tee.as_ref().expect("active player must have tee");
 
-                // input state for this player (use defaults if not yet received)
-                let default_input = InputState::default();
-                let input = world
-                    .player_inputs
-                    .get(&snap_id.0)
-                    .unwrap_or(&default_input);
-                let move_dir = input.direction as f32;
-                let key_jump = if input.jump { 1.0 } else { 0.0 };
-                let key_fire = if input.fire { 1.0 } else { 0.0 };
-                let key_hook = if input.hook { 1.0 } else { 0.0 };
+            // skip tick if no input received yet
+            let Some(input) = world.player_inputs.get(&snap_id.0) else {
+                continue;
+            };
 
-                // cursor position (raw and polar coordinates)
-                let cursor_x = input.target_x as f32;
-                let cursor_y = input.target_y as f32;
-                let aim_distance = (cursor_x * cursor_x + cursor_y * cursor_y).sqrt();
+            println!("tick={} id={} snap", self.current_tick, &snap_id.0);
 
-                // hook state
-                let hook_grabbed = tee.hook_state == HookState::Grabbed;
-                let (hook_pos_x, hook_pos_y) = if hook_grabbed {
-                    (
-                        tee.hook_pos.x.to_num::<f32>(),
-                        tee.hook_pos.y.to_num::<f32>(),
-                    )
-                } else {
-                    (0.0, 0.0) // if hook is not actively grabbing, set hook position to (0, 0)
-                };
+            let aim_angle = tee.angle.to_num::<f32>();
+            let is_frozen = tee.freeze_end > tick;
+            let freeze_status = if is_frozen { 1.0 } else { 0.0 };
 
-                // weapon selection
-                let is_hammer = tee.weapon == ActiveWeapon::Hammer;
-                let is_gun = tee.weapon == ActiveWeapon::Pistol;
-                let is_other_weapon = !is_hammer && !is_gun;
+            let move_dir = input.direction as f32;
+            let key_jump = if input.jump { 1.0 } else { 0.0 };
+            let key_fire = if input.fire { 1.0 } else { 0.0 };
+            let key_hook = if input.hook { 1.0 } else { 0.0 };
 
-                // jump state
-                let is_grounded = tee.jumps >= 2;
-                let can_jump = tee.jumps > 0;
+            // cursor position (raw and polar coordinates)
+            let cursor_x = input.target_x as f32;
+            let cursor_y = input.target_y as f32;
+            let aim_distance = (cursor_x * cursor_x + cursor_y * cursor_y).sqrt();
 
-                let tick_data = TickData {
-                    tick: self.current_tick,
-                    pos_x: tee.pos.x.to_num::<f32>(),
-                    pos_y: tee.pos.y.to_num::<f32>(),
-                    vel_x: tee.vel.x.to_num::<f32>(),
-                    vel_y: tee.vel.y.to_num::<f32>(),
-                    cursor_x,
-                    cursor_y,
-                    aim_angle,
-                    aim_distance,
-                    move_dir,
-                    key_jump,
-                    key_fire,
-                    key_hook,
-                    is_grounded: if is_grounded { 1.0 } else { 0.0 },
-                    freeze_status,
-                    hook_grabbed: if hook_grabbed { 1.0 } else { 0.0 },
-                    hook_pos_x,
-                    hook_pos_y,
-                    is_hammer: if is_hammer { 1.0 } else { 0.0 },
-                    is_gun: if is_gun { 1.0 } else { 0.0 },
-                    is_other_weapon: if is_other_weapon { 1.0 } else { 0.0 },
-                    jumps_remaining: tee.jumps as f32,
-                    can_jump: if can_jump { 1.0 } else { 0.0 },
-                };
+            // hook state
+            let hook_grabbed = tee.hook_state == HookState::Grabbed;
+            let (hook_pos_x, hook_pos_y) = if hook_grabbed {
+                (
+                    tee.hook_pos.x.to_num::<f32>(),
+                    tee.hook_pos.y.to_num::<f32>(),
+                )
+            } else {
+                (0.0, 0.0) // if hook is not actively grabbing, set hook position to (0, 0)
+            };
 
-                self.active_sequences
-                    .entry(snap_id.0)
-                    .or_default()
-                    .push(tick_data);
-            }
+            // weapon selection
+            let is_hammer = tee.weapon == ActiveWeapon::Hammer;
+            let is_gun = tee.weapon == ActiveWeapon::Pistol;
+            let is_other_weapon = !is_hammer && !is_gun;
+
+            // jump state
+            let is_grounded = tee.jumps >= 2; // TODO: this is wrong xd
+            let can_jump = tee.jumps > 0;
+
+            let tick_data = TickData {
+                tick: self.current_tick,
+                pos_x: tee.pos.x.to_num::<f32>(),
+                pos_y: tee.pos.y.to_num::<f32>(),
+                vel_x: tee.vel.x.to_num::<f32>(),
+                vel_y: tee.vel.y.to_num::<f32>(),
+                cursor_x,
+                cursor_y,
+                aim_angle,
+                aim_distance,
+                move_dir,
+                key_jump,
+                key_fire,
+                key_hook,
+                is_grounded: if is_grounded { 1.0 } else { 0.0 },
+                freeze_status,
+                hook_grabbed: if hook_grabbed { 1.0 } else { 0.0 },
+                hook_pos_x,
+                hook_pos_y,
+                is_hammer: if is_hammer { 1.0 } else { 0.0 },
+                is_gun: if is_gun { 1.0 } else { 0.0 },
+                is_other_weapon: if is_other_weapon { 1.0 } else { 0.0 },
+                jumps_remaining: tee.jumps as f32,
+                can_jump: if can_jump { 1.0 } else { 0.0 },
+            };
+
+            self.active_sequences
+                .entry(snap_id.0)
+                .or_default()
+                .push(tick_data);
         }
 
-        for id in &seen_this_tick {
-            self.start_tick.entry(*id).or_insert(self.current_tick);
-        }
-
-        // finish sequences for ids that disappeared (player left or went to spectate?)
-
-        // collect finished ids first (required for borrow checker)
-        let mut finished_ids = Vec::new();
-        for (id, start) in self.start_tick.iter() {
-            if !seen_this_tick.contains(id) {
-                let (name, _team) = self
-                    .active_player_info
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| (format!("player_{id}"), 0));
-                println!(
-                    "id={}: [{}, {}], name={}",
-                    id,
-                    start,
-                    self.current_tick - 1,
-                    name
-                );
-                finished_ids.push(*id);
-            }
-        }
+        // finish sequences for players who left (in active_sequences but not in world.active_players)
+        let finished_ids: Vec<u32> = self
+            .active_sequences
+            .keys()
+            .filter(|id| !world.active_players.contains(id))
+            .copied()
+            .collect();
         for id in finished_ids {
-            self.start_tick.remove(&id);
-
             let (player_name, team) = self
                 .active_player_info
                 .remove(&id)
@@ -284,7 +273,7 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
 
     // add any still-active sequences (players still in game at end of replay)
     for (player_id, data) in data_writer.active_sequences {
-        let start_tick = data.first().map(|d| d.tick).unwrap_or(0);
+        let start_tick = data.first().map(|d| d.tick).unwrap_or(0); // TODO: zero makes no sense here
         let end_tick = data.last().map(|d| d.tick).unwrap_or(0);
 
         let (player_name, team) = data_writer
