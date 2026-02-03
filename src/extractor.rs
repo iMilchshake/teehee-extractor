@@ -87,9 +87,9 @@ impl DemoWrite<World> for DataCapturingWriter {
             let key_fire = if input.fire { 1.0 } else { 0.0 };
             let key_hook = if input.hook { 1.0 } else { 0.0 };
 
-            // cursor position (raw and polar coordinates)
-            let cursor_x = input.target_x as f32;
-            let cursor_y = input.target_y as f32;
+            // cursor position (convert from raw to game world units)
+            let cursor_x = input.target_x as f32 / 32.0;
+            let cursor_y = input.target_y as f32 / 32.0;
             let aim_distance = (cursor_x * cursor_x + cursor_y * cursor_y).sqrt();
 
             // hook state
