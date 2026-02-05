@@ -1,4 +1,4 @@
-use crate::sequence::{FinishInfo, TickData};
+use crate::sequence::{ActiveRegion, FinishInfo, RegionEndReason, TickData};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use teehistorian_replayer::twgame_core::console::Command;
@@ -46,6 +46,42 @@ pub struct TrackedPlayer {
     pub data: Vec<TickData>,
     pub timeout_code: Option<String>,
     pub finishes: Vec<FinishInfo>,
+    /// Start tick of the current active region
+    pub current_region_start: i64,
+    /// Team during the current active region
+    pub current_team: i32,
+    /// Whether practice mode is enabled for current region
+    pub current_practice: bool,
+    /// Completed active regions
+    pub completed_regions: Vec<ActiveRegion>,
+}
+
+impl TrackedPlayer {
+    /// Close the current region and start a new one.
+    /// The end_tick is the tick WHEN the event occurs - the region ends at end_tick - 1.
+    pub fn close_region(&mut self, end_tick: i64, reason: RegionEndReason) {
+        // Region ends at the tick before the event
+        let region_end = end_tick - 1;
+        // Only create a region if there's actual content
+        if region_end >= self.current_region_start {
+            self.completed_regions.push(ActiveRegion::new(
+                self.current_region_start,
+                region_end,
+                self.current_team,
+                self.current_practice,
+                reason,
+            ));
+        }
+        // New region starts at the event tick
+        self.current_region_start = end_tick;
+        // Practice mode is reset on region change
+        self.current_practice = false;
+    }
+
+    /// Set practice mode for the current region
+    pub fn set_practice(&mut self) {
+        self.current_practice = true;
+    }
 }
 
 /// Wrapper around DdnetReplayerWorld that provides hooks for tracking game events
@@ -76,6 +112,7 @@ impl Game for World {
     }
 
     fn player_ready(&mut self, id: u32) {
+        let current_tick = self.current_tick as i64;
         self.tracked_players.borrow_mut().insert(
             id,
             TrackedPlayer {
@@ -86,6 +123,10 @@ impl Game for World {
                 data: Vec::new(),
                 timeout_code: None,
                 finishes: Vec::new(),
+                current_region_start: current_tick,
+                current_team: 0,
+                current_practice: false,
+                completed_regions: Vec::new(),
             },
         );
         self.world.player_ready(id);
@@ -99,7 +140,11 @@ impl Game for World {
     }
 
     fn player_leave(&mut self, id: u32) {
-        if let Some(player) = self.tracked_players.borrow_mut().remove(&id) {
+        let current_tick = self.current_tick as i64;
+        if let Some(mut player) = self.tracked_players.borrow_mut().remove(&id) {
+            // Close the final region with Leave reason
+            // Use current_tick + 1 because the player is still active at current_tick
+            player.close_region(current_tick + 1, RegionEndReason::Leave);
             self.completed_players.borrow_mut().push(player);
         }
         self.world.player_leave(id);
@@ -110,10 +155,39 @@ impl Game for World {
     }
 
     fn on_command(&mut self, id: u32, command: &Command) {
+        let current_tick = self.current_tick as i64;
+
+        match command {
+            Command::Kill => {
+                if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
+                    player.close_region(current_tick, RegionEndReason::Kill);
+                }
+            }
+            Command::Team(team) => {
+                if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
+                    player.close_region(current_tick, RegionEndReason::TeamChange);
+                    player.current_team = *team;
+                }
+            }
+            _ => {}
+        }
+
         self.world.on_command(id, command);
     }
 
     fn swap_tees(&mut self, id1: u32, id2: u32) {
+        let current_tick = self.current_tick as i64;
+
+        // Close regions for both players with SwapTees reason
+        let mut tracked = self.tracked_players.borrow_mut();
+        if let Some(player1) = tracked.get_mut(&id1) {
+            player1.close_region(current_tick, RegionEndReason::SwapTees);
+        }
+        if let Some(player2) = tracked.get_mut(&id2) {
+            player2.close_region(current_tick, RegionEndReason::SwapTees);
+        }
+        drop(tracked);
+
         self.world.swap_tees(id1, id2);
     }
 

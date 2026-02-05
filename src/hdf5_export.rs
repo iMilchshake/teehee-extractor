@@ -1,5 +1,5 @@
 use crate::features::FeatureSet;
-use crate::sequence::PlayerSequence;
+use crate::sequence::{PlayerSequence, RegionEndReason};
 use anyhow::{Context, Result};
 use ndarray::Array2;
 use std::path::Path;
@@ -85,18 +85,77 @@ pub fn write_hdf5(
             .create("time_of_day")?;
         time_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(&seq.time_of_day)?)?;
 
-        // write active_regions as [n_regions x 2] dataset
+        // write active_regions as a nested group with multiple datasets
         let n_regions = seq.active_regions.len();
-        let regions_dataset = group
-            .new_dataset::<u64>()
+        let regions_group = group.create_group("active_regions")?;
+
+        // ticks: [n_regions x 2] i64 (start_tick, end_tick)
+        let ticks_dataset = regions_group
+            .new_dataset::<i64>()
             .shape([n_regions, 2])
-            .create("active_regions")?;
-        let regions_data: Vec<u64> = seq
+            .create("ticks")?;
+        let ticks_data: Vec<i64> = seq
             .active_regions
             .iter()
-            .flat_map(|(start, end)| [*start as u64, *end as u64])
+            .flat_map(|r| [r.start_tick, r.end_tick])
             .collect();
-        regions_dataset.write_raw(&regions_data)?;
+        ticks_dataset.write_raw(&ticks_data)?;
+
+        // indices: [n_regions x 2] u64 (start_idx, end_idx)
+        let indices_dataset = regions_group
+            .new_dataset::<u64>()
+            .shape([n_regions, 2])
+            .create("indices")?;
+        let indices_data: Vec<u64> = seq
+            .active_regions
+            .iter()
+            .flat_map(|r| {
+                [
+                    r.start_idx.unwrap_or(0) as u64,
+                    r.end_idx.unwrap_or(0) as u64,
+                ]
+            })
+            .collect();
+        indices_dataset.write_raw(&indices_data)?;
+
+        // team: [n_regions] i32
+        let team_dataset = regions_group
+            .new_dataset::<i32>()
+            .shape([n_regions])
+            .create("team")?;
+        let team_data: Vec<i32> = seq.active_regions.iter().map(|r| r.team).collect();
+        team_dataset.write_raw(&team_data)?;
+
+        // practice: [n_regions] u8 (0 or 1)
+        let practice_dataset = regions_group
+            .new_dataset::<u8>()
+            .shape([n_regions])
+            .create("practice")?;
+        let practice_data: Vec<u8> = seq
+            .active_regions
+            .iter()
+            .map(|r| if r.practice { 1 } else { 0 })
+            .collect();
+        practice_dataset.write_raw(&practice_data)?;
+
+        // end_reason: [n_regions] u8 (enum as int)
+        let end_reason_dataset = regions_group
+            .new_dataset::<u8>()
+            .shape([n_regions])
+            .create("end_reason")?;
+        let end_reason_data: Vec<u8> = seq
+            .active_regions
+            .iter()
+            .map(|r| r.end_reason.as_u8())
+            .collect();
+        end_reason_dataset.write_raw(&end_reason_data)?;
+
+        // Add attribute with enum names for reference
+        let end_reason_names_attr = regions_group
+            .new_attr::<hdf5::types::VarLenAscii>()
+            .create("end_reason_names")?;
+        end_reason_names_attr
+            .write_scalar(&hdf5::types::VarLenAscii::from_ascii(RegionEndReason::names())?)?;
 
         // write timeout_code if present
         if let Some(ref timeout_code) = seq.timeout_code {

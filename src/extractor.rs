@@ -1,4 +1,7 @@
-use crate::sequence::{compute_active_regions, drop_afk_ticks, PlayerSequence, TickData};
+use crate::sequence::{
+    drop_afk_ticks, resolve_region_indices, split_regions_on_gaps, PlayerSequence, RegionEndReason,
+    TickData,
+};
 use crate::world::World;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -20,6 +23,8 @@ use twgame::{DdnetReplayerWorld, Map, ThHeader};
 struct DataCapturingWriter {
     tick_data: HashMap<u32, Vec<TickData>>,
     current_tick: i64,
+    /// Players who triggered /practice this tick, processed in snap_and_write
+    pending_practice_players: Vec<i32>,
 }
 
 impl DataCapturingWriter {
@@ -27,18 +32,21 @@ impl DataCapturingWriter {
         Self {
             tick_data: HashMap::new(),
             current_tick: 0,
+            pending_practice_players: Vec::new(),
         }
     }
 }
 
 impl DemoChatWrite for DataCapturingWriter {
     fn write_chat(&mut self, _msg: &str) -> Result<(), WriteError> {
-        dbg!("write_chat", _msg);
         Ok(())
     }
 
-    fn write_player_chat(&mut self, _player_id: i32, _msg: &str) -> Result<(), WriteError> {
-        dbg!("write_player_chat", _msg);
+    fn write_player_chat(&mut self, player_id: i32, msg: &str) -> Result<(), WriteError> {
+        // Detect /practice command
+        if msg.starts_with("/practice") {
+            self.pending_practice_players.push(player_id);
+        }
         Ok(())
     }
 }
@@ -60,12 +68,23 @@ impl DemoWrite<World> for DataCapturingWriter {
             let mut tracked_players = world.tracked_players.borrow_mut();
             let Some(tracked) = tracked_players.get_mut(&snap_id.0) else {
                 drop(tracked_players);
-                assert!(player.tee.is_none(), "player {} has tee but not tracked", snap_id.0);
+                assert!(
+                    player.tee.is_none(),
+                    "player {} has tee but not tracked",
+                    snap_id.0
+                );
                 continue;
             };
 
             // update current name and team in World (for finish matching)
             tracked.name = player.name.to_string();
+
+            // Detect team change from snap data (e.g., team changed via admin, not /team command)
+            if tracked.current_team != player.team {
+                tracked.close_region(self.current_tick, RegionEndReason::TeamChange);
+                tracked.current_team = player.team;
+            }
+
             tracked.team = player.team;
 
             // player is tracked, so tee must exist
@@ -141,6 +160,31 @@ impl DemoWrite<World> for DataCapturingWriter {
             self.tick_data.entry(snap_id.0).or_default().push(tick_data);
         }
 
+        // Process pending /practice commands
+        if !self.pending_practice_players.is_empty() {
+            let mut tracked_players = world.tracked_players.borrow_mut();
+
+            // Collect teams that triggered practice
+            let practice_teams: Vec<i32> = self
+                .pending_practice_players
+                .iter()
+                .filter_map(|&pid| {
+                    tracked_players
+                        .get(&(pid as u32))
+                        .map(|p| p.current_team)
+                })
+                .collect();
+
+            // Mark all players on those teams as practice
+            for player in tracked_players.values_mut() {
+                if practice_teams.contains(&player.current_team) {
+                    player.set_practice();
+                }
+            }
+
+            self.pending_practice_players.clear();
+        }
+
         Ok(())
     }
 
@@ -191,6 +235,13 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
     let replayer = ThReplayer::new(header_raw, &mut world);
     replayer.validate(&mut world, &mut th_stream, Some(&mut data_writer));
 
+    // Close regions for still-active players (map ended / server shutdown)
+    // Use final_tick + 1 because players are still active at final_tick
+    let final_tick = world.current_tick as i64;
+    for player in world.tracked_players.borrow_mut().values_mut() {
+        player.close_region(final_tick + 1, RegionEndReason::ChangeMap);
+    }
+
     // combine completed players (left during replay) and still-active players
     let all_players = world
         .completed_players
@@ -208,7 +259,11 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
             player.data.append(&mut tick_data);
         }
 
-        assert!(!player.name.is_empty(), "player {} has no name", player.player_id);
+        assert!(
+            !player.name.is_empty(),
+            "player {} has no name",
+            player.player_id
+        );
 
         // skip empty sequences
         if player.data.is_empty() {
@@ -218,8 +273,18 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
         let start_tick = player.data.first().map(|d| d.tick).unwrap();
         let end_tick = player.data.last().map(|d| d.tick).unwrap();
 
+        // Step 1: Find tick gaps BEFORE AFK removal (these are Spectate gaps)
+        let mut regions = player.completed_regions.clone();
+        regions = split_regions_on_gaps(regions, &player.data, RegionEndReason::Spectate);
+
+        // Step 2: Remove AFK ticks
         drop_afk_ticks(&mut player.data);
-        let active_regions = compute_active_regions(&player.data);
+
+        // Step 3: Find NEW tick gaps AFTER AFK removal (these are AFK gaps)
+        regions = split_regions_on_gaps(regions, &player.data, RegionEndReason::Afk);
+
+        // Step 4: Resolve tick boundaries to data array indices
+        resolve_region_indices(&mut regions, &player.data);
 
         sequences.push(PlayerSequence {
             player_name: player.name,
@@ -230,7 +295,7 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
             time_of_day: time_of_day.clone(),
             map_name: map_name.clone(),
             data: player.data,
-            active_regions,
+            active_regions: regions,
             timeout_code: player.timeout_code,
         });
     }
