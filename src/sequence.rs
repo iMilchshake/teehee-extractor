@@ -147,18 +147,15 @@ fn fmt_vec_len<T>(v: &Vec<T>, f: &mut std::fmt::Formatter) -> Result<(), std::fm
     write!(f, "[{} items]", v.len())
 }
 
-/// Ticks of unchanged move_dir to be considered AFK (1 second at 50Hz)
-const AFK_TICKS: usize = 500;
-
-/// Remove AFK ticks (move_dir unchanged for AFK_TICKS+ consecutive ticks)
-pub fn drop_afk_ticks(data: &mut Vec<TickData>) {
+/// Remove AFK ticks (move_dir unchanged for `afk_ticks`+ consecutive ticks)
+pub fn drop_afk_ticks(data: &mut Vec<TickData>, afk_ticks: usize) {
     let mut keep = vec![true; data.len()];
     let mut same_count = 0;
 
     for i in 0..data.len().saturating_sub(1) {
         if data[i + 1].move_dir == data[i].move_dir {
             same_count += 1;
-            if same_count >= AFK_TICKS {
+            if same_count >= afk_ticks {
                 keep[i + 1] = false;
             }
         } else {
@@ -221,11 +218,11 @@ pub fn split_regions_on_gaps(
     let mut result = vec![];
 
     for region in regions {
-        // Find gaps that fall within this region
+        // Find gaps that start within this region
         let region_gaps: Vec<_> = gaps
             .iter()
-            .filter(|(gap_start, gap_end)| {
-                *gap_start >= region.start_tick && *gap_end <= region.end_tick
+            .filter(|(gap_start, _gap_end)| {
+                *gap_start >= region.start_tick && *gap_start < region.end_tick
             })
             .collect();
 
@@ -248,13 +245,16 @@ pub fn split_regions_on_gaps(
             }
 
             // Final region after last gap (keeps original end_reason)
-            result.push(ActiveRegion::new(
-                current_start,
-                region.end_tick,
-                region.team,
-                region.practice,
-                region.end_reason,
-            ));
+            // Skip if the last gap extended past the region boundary
+            if current_start <= region.end_tick {
+                result.push(ActiveRegion::new(
+                    current_start,
+                    region.end_tick,
+                    region.team,
+                    region.practice,
+                    region.end_reason,
+                ));
+            }
         }
     }
 

@@ -5,7 +5,7 @@ use crate::sequence::{
 use crate::world::World;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,18 +21,19 @@ use twgame::{DdnetReplayerWorld, Map, ThHeader};
 
 /// Captures tick data during replay
 struct DataCapturingWriter {
-    tick_data: HashMap<u32, Vec<TickData>>,
     current_tick: i64,
     /// Players who triggered /practice this tick, processed in snap_and_write
     pending_practice_players: Vec<i32>,
+    /// Teams that have practice mode enabled
+    practice_teams: HashSet<i32>,
 }
 
 impl DataCapturingWriter {
     fn new() -> Self {
         Self {
-            tick_data: HashMap::new(),
             current_tick: 0,
             pending_practice_players: Vec::new(),
+            practice_teams: HashSet::new(),
         }
     }
 }
@@ -81,13 +82,24 @@ impl DemoWrite<World> for DataCapturingWriter {
 
             // Detect team change from snap data (e.g., team changed via admin, not /team command)
             if tracked.current_team != player.team {
+                let old_team = tracked.current_team;
                 tracked.close_region(self.current_tick, RegionEndReason::TeamChange);
                 tracked.current_team = player.team;
+                // Inherit practice state from new team
+                tracked.current_practice = self.practice_teams.contains(&player.team);
+
+                // Remove old team from practice set if no one is left on it
+                if self.practice_teams.contains(&old_team) {
+                    let anyone_left = snap_buf.players.iter()
+                        .any(|(sid, p)| sid.0 != snap_id.0 && p.team == old_team);
+                    if !anyone_left {
+                        self.practice_teams.remove(&old_team);
+                    }
+                }
             }
 
             tracked.team = player.team;
 
-            // player is tracked, so tee must exist
             let tee = player.tee.as_ref().expect("tracked player must have tee");
 
             // skip tick if no input received yet
@@ -157,32 +169,33 @@ impl DemoWrite<World> for DataCapturingWriter {
                 can_jump: if can_jump { 1.0 } else { 0.0 },
             };
 
-            self.tick_data.entry(snap_id.0).or_default().push(tick_data);
+            // Push directly into TrackedPlayer so data follows it on player_leave
+            world.tracked_players.borrow_mut()
+                .get_mut(&snap_id.0)
+                .expect("player disappeared mid-tick")
+                .data.push(tick_data);
         }
 
         // Process pending /practice commands
         if !self.pending_practice_players.is_empty() {
             let mut tracked_players = world.tracked_players.borrow_mut();
 
-            // Collect teams that triggered practice
-            let practice_teams: Vec<i32> = self
-                .pending_practice_players
-                .iter()
-                .filter_map(|&pid| {
-                    tracked_players
-                        .get(&(pid as u32))
-                        .map(|p| p.current_team)
-                })
-                .collect();
+            // Add teams to practice set (team 0 = no team, can't practice)
+            for &pid in &self.pending_practice_players {
+                if let Some(player) = tracked_players.get(&(pid as u32)) {
+                    if player.current_team != 0 {
+                        self.practice_teams.insert(player.current_team);
+                    }
+                }
+            }
+            self.pending_practice_players.clear();
 
-            // Mark all players on those teams as practice
+            // Mark all current players on newly-practice teams
             for player in tracked_players.values_mut() {
-                if practice_teams.contains(&player.current_team) {
+                if self.practice_teams.contains(&player.current_team) {
                     player.set_practice();
                 }
             }
-
-            self.pending_practice_players.clear();
         }
 
         Ok(())
@@ -194,7 +207,8 @@ impl DemoWrite<World> for DataCapturingWriter {
 }
 
 /// Extract player sequences from a teehistorian file using the replayer.
-pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Vec<PlayerSequence>> {
+/// `afk_ticks`: if Some, remove AFK periods longer than this many ticks. If None, skip AFK removal.
+pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path, afk_ticks: Option<usize>) -> Result<Vec<PlayerSequence>> {
     let file = File::open(teehistorian_path)
         .with_context(|| format!("Failed to open file: {}", teehistorian_path.display()))?;
 
@@ -254,11 +268,6 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
     let mut sequences = Vec::new();
 
     for mut player in all_players {
-        // merge tick data from DataCapturingWriter
-        if let Some(mut tick_data) = data_writer.tick_data.remove(&player.player_id) {
-            player.data.append(&mut tick_data);
-        }
-
         assert!(
             !player.name.is_empty(),
             "player {} has no name",
@@ -277,14 +286,21 @@ pub fn extract_sequences(teehistorian_path: &Path, maps_dir: &Path) -> Result<Ve
         let mut regions = player.completed_regions.clone();
         regions = split_regions_on_gaps(regions, &player.data, RegionEndReason::Spectate);
 
-        // Step 2: Remove AFK ticks
-        drop_afk_ticks(&mut player.data);
+        // Step 2: Remove AFK ticks (if enabled)
+        if let Some(threshold) = afk_ticks {
+            drop_afk_ticks(&mut player.data, threshold);
 
-        // Step 3: Find NEW tick gaps AFTER AFK removal (these are AFK gaps)
-        regions = split_regions_on_gaps(regions, &player.data, RegionEndReason::Afk);
+            // Step 3: Find NEW tick gaps AFTER AFK removal (these are AFK gaps)
+            regions = split_regions_on_gaps(regions, &player.data, RegionEndReason::Afk);
+        }
 
         // Step 4: Resolve tick boundaries to data array indices
         resolve_region_indices(&mut regions, &player.data);
+
+        // Step 5: Drop regions with no data remaining after AFK removal.
+        // This happens when a region's entire tick range was AFK (e.g. player
+        // idle before leaving), resulting in start_idx/end_idx both being None.
+        regions.retain(|r| r.start_idx.is_some());
 
         sequences.push(PlayerSequence {
             player_name: player.name,

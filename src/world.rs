@@ -74,8 +74,13 @@ impl TrackedPlayer {
         }
         // New region starts at the event tick
         self.current_region_start = end_tick;
-        // Practice mode is reset on region change
-        self.current_practice = false;
+        // Practice is per-team: only reset when leaving the team
+        match reason {
+            RegionEndReason::TeamChange | RegionEndReason::Leave | RegionEndReason::ChangeMap => {
+                self.current_practice = false;
+            }
+            _ => {} // Kill, SwapTees: practice persists
+        }
     }
 
     /// Set practice mode for the current region
@@ -151,6 +156,12 @@ impl Game for World {
     }
 
     fn on_net_msg(&mut self, id: u32, msg: &ClNetMessage) {
+        if matches!(msg, ClNetMessage::ClKill) {
+            let current_tick = self.current_tick as i64;
+            if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
+                player.close_region(current_tick, RegionEndReason::Kill);
+            }
+        }
         self.world.on_net_msg(id, msg);
     }
 
@@ -163,12 +174,9 @@ impl Game for World {
                     player.close_region(current_tick, RegionEndReason::Kill);
                 }
             }
-            Command::Team(team) => {
-                if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
-                    player.close_region(current_tick, RegionEndReason::TeamChange);
-                    player.current_team = *team;
-                }
-            }
+            // Team changes are detected in snap_and_write from snap data,
+            // which is the ground truth. Detecting here too would cause
+            // double-detection since the snap lags behind on_command by 1 tick.
             _ => {}
         }
 

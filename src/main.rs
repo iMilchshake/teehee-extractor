@@ -33,6 +33,15 @@ enum Command {
         /// Default: all features
         #[arg(short, long)]
         features: Option<String>,
+
+        /// AFK threshold in seconds. Ticks where move_dir is unchanged for longer
+        /// than this are removed. Default: 10
+        #[arg(long, default_value = "10")]
+        afk: f32,
+
+        /// Disable AFK removal entirely
+        #[arg(long)]
+        no_afk: bool,
     },
     /// List all available features and groups
     ListFeatures,
@@ -62,6 +71,8 @@ fn main() -> Result<()> {
             output,
             maps_dir,
             features,
+            afk,
+            no_afk,
         } => {
             // parse feature selection
             let feature_set = match &features {
@@ -79,7 +90,13 @@ fn main() -> Result<()> {
                 feature_set.names().join(", ")
             );
 
-            let sequences = extract_sequences(&input, &maps_dir)?;
+            let afk_ticks = if no_afk {
+                None
+            } else {
+                Some((afk * 50.0) as usize)
+            };
+
+            let sequences = extract_sequences(&input, &maps_dir, afk_ticks)?;
 
             println!("Found {} player sequences", sequences.len());
 
