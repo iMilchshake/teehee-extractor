@@ -218,6 +218,34 @@ impl FeatureSet {
         self.features.is_empty()
     }
 
+    /// Extract a single feature value from TickData
+    pub fn extract_single(&self, tick: &crate::TickData, feature: Feature) -> f32 {
+        match feature {
+            Feature::PosX => tick.pos_x,
+            Feature::PosY => tick.pos_y,
+            Feature::VelX => tick.vel_x,
+            Feature::VelY => tick.vel_y,
+            Feature::CursorX => tick.cursor_x,
+            Feature::CursorY => tick.cursor_y,
+            Feature::AimAngle => tick.aim_angle,
+            Feature::AimDistance => tick.aim_distance,
+            Feature::MoveDir => tick.move_dir,
+            Feature::KeyJump => tick.key_jump,
+            Feature::KeyFire => tick.key_fire,
+            Feature::KeyHook => tick.key_hook,
+            Feature::IsGrounded => tick.is_grounded,
+            Feature::FreezeStatus => tick.freeze_status,
+            Feature::HookGrabbed => tick.hook_grabbed,
+            Feature::HookPosX => tick.hook_pos_x,
+            Feature::HookPosY => tick.hook_pos_y,
+            Feature::IsHammer => tick.is_hammer,
+            Feature::IsGun => tick.is_gun,
+            Feature::IsOtherWeapon => tick.is_other_weapon,
+            Feature::JumpsRemaining => tick.jumps_remaining,
+            Feature::CanJump => tick.can_jump,
+        }
+    }
+
     /// Extract values from TickData for selected features
     pub fn extract(&self, tick: &crate::TickData) -> Vec<f32> {
         self.features

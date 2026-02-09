@@ -4,36 +4,48 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 use std::path::Path;
 
-/// Write player sequences to HDF5 file with selected features.
-pub fn write_hdf5(
-    sequences: &[PlayerSequence],
-    output_path: &Path,
-    feature_set: &FeatureSet,
-) -> Result<()> {
-    let file = hdf5::File::create(output_path)
-        .with_context(|| format!("Failed to create HDF5 file: {}", output_path.display()))?;
+/// Streaming HDF5 writer that writes sequences one at a time.
+pub struct Hdf5Writer {
+    file: hdf5::File,
+    feature_set: FeatureSet,
+    seq_idx: usize,
+}
 
-    // store feature names as root-level attribute for consumers to know column ordering
-    let feature_names = feature_set.names().join(",");
-    let features_attr = file
-        .new_attr::<hdf5::types::VarLenAscii>()
-        .create("feature_names")?;
-    features_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(&feature_names)?)?;
+impl Hdf5Writer {
+    /// Create a new HDF5 file and write the feature names attribute.
+    pub fn create(output_path: &Path, feature_set: FeatureSet) -> Result<Self> {
+        let file = hdf5::File::create(output_path)
+            .with_context(|| format!("Failed to create HDF5 file: {}", output_path.display()))?;
 
-    let n_features = feature_set.len();
+        // store feature names as root-level attribute for consumers to know column ordering
+        let feature_names = feature_set.names().join(",");
+        let features_attr = file
+            .new_attr::<hdf5::types::VarLenAscii>()
+            .create("feature_names")?;
+        features_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(&feature_names)?)?;
 
-    for (idx, seq) in sequences.iter().enumerate() {
+        Ok(Self {
+            file,
+            feature_set,
+            seq_idx: 0,
+        })
+    }
+
+    /// Write a single sequence to the HDF5 file. Returns the sequence index used.
+    pub fn write_sequence(&mut self, seq: &PlayerSequence) -> Result<usize> {
         if seq.data.is_empty() {
-            continue;
+            return Ok(self.seq_idx);
         }
 
-        let group = file.create_group(&format!("seq_{idx}"))?;
+        let idx = self.seq_idx;
+        let n_features = self.feature_set.len();
+        let group = self.file.create_group(&format!("seq_{idx}"))?;
 
         // convert Vec<TickData> to 2D array with [ticks x n_features]
         let n_ticks = seq.data.len();
         let mut data_array = Array2::<f32>::zeros((n_ticks, n_features));
         for (i, tick) in seq.data.iter().enumerate() {
-            let values = feature_set.extract(tick);
+            let values = self.feature_set.extract(tick);
             for (j, val) in values.into_iter().enumerate() {
                 data_array[[i, j]] = val;
             }
@@ -150,7 +162,7 @@ pub fn write_hdf5(
             .collect();
         end_reason_dataset.write_raw(&end_reason_data)?;
 
-        // Add attribute with enum names for reference
+        // add attribute with enum names for reference
         let end_reason_names_attr = regions_group
             .new_attr::<hdf5::types::VarLenAscii>()
             .create("end_reason_names")?;
@@ -164,7 +176,26 @@ pub fn write_hdf5(
                 .create("timeout_code")?;
             timeout_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(timeout_code)?)?;
         }
+
+        self.seq_idx += 1;
+        Ok(idx)
     }
 
+    /// Number of sequences written so far.
+    pub fn sequences_written(&self) -> usize {
+        self.seq_idx
+    }
+}
+
+/// Write player sequences to HDF5 file with selected features.
+pub fn write_hdf5(
+    sequences: &[PlayerSequence],
+    output_path: &Path,
+    feature_set: &FeatureSet,
+) -> Result<()> {
+    let mut writer = Hdf5Writer::create(output_path, feature_set.clone())?;
+    for seq in sequences {
+        writer.write_sequence(seq)?;
+    }
     Ok(())
 }

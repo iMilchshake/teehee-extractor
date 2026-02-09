@@ -190,12 +190,12 @@ pub fn resolve_region_indices(regions: &mut [ActiveRegion], data: &[TickData]) {
     }
 
     for region in regions.iter_mut() {
-        // Find start index: first tick >= start_tick AND <= end_tick
+        // find start index: first tick >= start_tick AND <= end_tick
         region.start_idx = data
             .iter()
             .position(|t| t.tick >= region.start_tick && t.tick <= region.end_tick);
 
-        // Find end index: last tick within region bounds (exclusive end)
+        // find end index: last tick within region bounds (exclusive end)
         region.end_idx = data
             .iter()
             .rposition(|t| t.tick >= region.start_tick && t.tick <= region.end_tick)
@@ -218,7 +218,7 @@ pub fn split_regions_on_gaps(
     let mut result = vec![];
 
     for region in regions {
-        // Find gaps that start within this region
+        // find gaps that start within this region
         let region_gaps: Vec<_> = gaps
             .iter()
             .filter(|(gap_start, _gap_end)| {
@@ -229,11 +229,11 @@ pub fn split_regions_on_gaps(
         if region_gaps.is_empty() {
             result.push(region);
         } else {
-            // Split the region on each gap
+            // split the region on each gap
             let mut current_start = region.start_tick;
 
             for (gap_start, gap_end) in region_gaps {
-                // Region before the gap
+                // region before the gap
                 result.push(ActiveRegion::new(
                     current_start,
                     *gap_start,
@@ -244,8 +244,8 @@ pub fn split_regions_on_gaps(
                 current_start = *gap_end;
             }
 
-            // Final region after last gap (keeps original end_reason)
-            // Skip if the last gap extended past the region boundary
+            // final region after last gap (keeps original end_reason)
+            // skip if the last gap extended past the region boundary
             if current_start <= region.end_tick {
                 result.push(ActiveRegion::new(
                     current_start,

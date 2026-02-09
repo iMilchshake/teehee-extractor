@@ -60,9 +60,9 @@ impl TrackedPlayer {
     /// Close the current region and start a new one.
     /// The end_tick is the tick WHEN the event occurs - the region ends at end_tick - 1.
     pub fn close_region(&mut self, end_tick: i64, reason: RegionEndReason) {
-        // Region ends at the tick before the event
+        // region ends at the tick before the event
         let region_end = end_tick - 1;
-        // Only create a region if there's actual content
+        // only create a region if there's actual content
         if region_end >= self.current_region_start {
             self.completed_regions.push(ActiveRegion::new(
                 self.current_region_start,
@@ -72,9 +72,9 @@ impl TrackedPlayer {
                 reason,
             ));
         }
-        // New region starts at the event tick
+        // new region starts at the event tick
         self.current_region_start = end_tick;
-        // Practice is per-team: only reset when leaving the team
+        // practice is per-team: only reset when leaving the team
         match reason {
             RegionEndReason::TeamChange | RegionEndReason::Leave | RegionEndReason::ChangeMap => {
                 self.current_practice = false;
@@ -147,8 +147,8 @@ impl Game for World {
     fn player_leave(&mut self, id: u32) {
         let current_tick = self.current_tick as i64;
         if let Some(mut player) = self.tracked_players.borrow_mut().remove(&id) {
-            // Close the final region with Leave reason
-            // Use current_tick + 1 because the player is still active at current_tick
+            // close the final region with Leave reason
+            // use current_tick + 1 because the player is still active at current_tick
             player.close_region(current_tick + 1, RegionEndReason::Leave);
             self.completed_players.borrow_mut().push(player);
         }
@@ -174,7 +174,7 @@ impl Game for World {
                     player.close_region(current_tick, RegionEndReason::Kill);
                 }
             }
-            // Team changes are detected in snap_and_write from snap data,
+            // team changes are detected in snap_and_write from snap data,
             // which is the ground truth. Detecting here too would cause
             // double-detection since the snap lags behind on_command by 1 tick.
             _ => {}
@@ -186,7 +186,7 @@ impl Game for World {
     fn swap_tees(&mut self, id1: u32, id2: u32) {
         let current_tick = self.current_tick as i64;
 
-        // Close regions for both players with SwapTees reason
+        // close regions for both players with SwapTees reason
         let mut tracked = self.tracked_players.borrow_mut();
         if let Some(player1) = tracked.get_mut(&id1) {
             player1.close_region(current_tick, RegionEndReason::SwapTees);
