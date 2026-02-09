@@ -184,11 +184,7 @@ fn extract_directory(
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|ext| ext == "teehistorian")
-            {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "teehistorian") {
                 Some(path)
             } else {
                 None
@@ -201,7 +197,10 @@ fn extract_directory(
     }
 
     let n_files = files.len();
-    println!("Found {n_files} teehistorian files in {}", input_dir.display());
+    println!(
+        "Found {n_files} teehistorian files in {}",
+        input_dir.display()
+    );
 
     if n_files == 0 {
         println!("Nothing to do.");
@@ -217,7 +216,11 @@ fn extract_directory(
 
     // each rayon worker extracts and writes its own parquet file — fully parallel
     files.par_iter().for_each(|file| {
-        let filename = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let filename = file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         // catch panics (e.g. assert failures on corrupt data)
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

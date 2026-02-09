@@ -58,10 +58,8 @@ impl ParquetWriter {
         let team_arr = Int32Array::from(vec![seq.team; n_ticks]);
         let map_name_arr = StringArray::from(vec![seq.map_name.as_str(); n_ticks]);
         let time_of_day_arr = StringArray::from(vec![seq.time_of_day.as_str(); n_ticks]);
-        let timeout_code_arr = StringArray::from(vec![
-            seq.timeout_code.as_deref().unwrap_or("");
-            n_ticks
-        ]);
+        let timeout_code_arr =
+            StringArray::from(vec![seq.timeout_code.as_deref().unwrap_or(""); n_ticks]);
 
         // tick column
         let tick_arr = Int64Array::from(seq.data.iter().map(|t| t.tick).collect::<Vec<_>>());
@@ -87,7 +85,10 @@ impl ParquetWriter {
         let region_team_arr = Int32Array::from(region_teams);
         let region_practice_arr = BooleanArray::from(region_practices);
         let region_end_reason_arr = UInt8Array::from(
-            region_end_reasons.iter().map(|r| r.as_u8()).collect::<Vec<_>>(),
+            region_end_reasons
+                .iter()
+                .map(|r| r.as_u8())
+                .collect::<Vec<_>>(),
         );
 
         // feature columns

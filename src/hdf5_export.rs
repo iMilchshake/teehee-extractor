@@ -166,8 +166,9 @@ impl Hdf5Writer {
         let end_reason_names_attr = regions_group
             .new_attr::<hdf5::types::VarLenAscii>()
             .create("end_reason_names")?;
-        end_reason_names_attr
-            .write_scalar(&hdf5::types::VarLenAscii::from_ascii(RegionEndReason::names())?)?;
+        end_reason_names_attr.write_scalar(&hdf5::types::VarLenAscii::from_ascii(
+            RegionEndReason::names(),
+        )?)?;
 
         // write timeout_code if present
         if let Some(ref timeout_code) = seq.timeout_code {

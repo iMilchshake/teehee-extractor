@@ -63,7 +63,13 @@ pub struct ActiveRegion {
 
 impl ActiveRegion {
     /// Create a new active region
-    pub fn new(start_tick: i64, end_tick: i64, team: i32, practice: bool, end_reason: RegionEndReason) -> Self {
+    pub fn new(
+        start_tick: i64,
+        end_tick: i64,
+        team: i32,
+        practice: bool,
+        end_reason: RegionEndReason,
+    ) -> Self {
         Self {
             start_tick,
             end_tick,
