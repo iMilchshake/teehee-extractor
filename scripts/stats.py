@@ -17,6 +17,8 @@ END_REASONS = {
     5: "Leave",
     6: "ChangeMap",
     7: "Unknown",
+    8: "Teleport",
+    9: "UnknownTeleport",
 }
 
 

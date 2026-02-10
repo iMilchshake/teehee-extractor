@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use log::debug;
 use mimalloc::MiMalloc;
 use rayon::prelude::*;
 use std::path::PathBuf;
@@ -62,6 +63,10 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("teehee_extractor=info"),
+    )
+    .init();
     let args = Args::parse();
 
     match args.command {
@@ -233,9 +238,9 @@ fn extract_directory(
             Ok(Ok((n_seq, n_ticks))) => {
                 if n_seq > 0 {
                     total_sequences.fetch_add(n_seq, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!("[{n}/{n_files}] {filename} -> {n_seq} sequences, {n_ticks} ticks");
+                    debug!("[{n}/{n_files}] {filename} -> {n_seq} sequences, {n_ticks} ticks");
                 } else {
-                    eprintln!("[{n}/{n_files}] {filename} -> empty, skipped");
+                    debug!("[{n}/{n_files}] {filename} -> empty, skipped");
                 }
             }
             Ok(Err(e)) => {

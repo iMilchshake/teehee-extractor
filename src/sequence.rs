@@ -17,6 +17,10 @@ pub enum RegionEndReason {
     Leave,
     /// Teehistorian file ended (map change or server shutdown)
     ChangeMap,
+    /// Player entered a teleporter
+    Teleport,
+    /// Large position jump with no known cause
+    UnknownTeleport,
     /// Tick gap with unknown cause
     Unknown,
 }
@@ -33,12 +37,14 @@ impl RegionEndReason {
             RegionEndReason::Leave => 5,
             RegionEndReason::ChangeMap => 6,
             RegionEndReason::Unknown => 7,
+            RegionEndReason::Teleport => 8,
+            RegionEndReason::UnknownTeleport => 9,
         }
     }
 
     /// Names for all enum variants (for HDF5 attribute)
     pub fn names() -> &'static str {
-        "Kill,TeamChange,SwapTees,Spectate,Afk,Leave,ChangeMap,Unknown"
+        "Kill,TeamChange,SwapTees,Spectate,Afk,Leave,ChangeMap,Unknown,Teleport,UnknownTeleport"
     }
 }
 

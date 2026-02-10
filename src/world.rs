@@ -1,4 +1,5 @@
 use crate::sequence::{ActiveRegion, FinishInfo, RegionEndReason, TickData};
+use log::debug;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use teehistorian_replayer::twgame_core::console::Command;
@@ -54,6 +55,10 @@ pub struct TrackedPlayer {
     pub current_practice: bool,
     /// Completed active regions
     pub completed_regions: Vec<ActiveRegion>,
+    /// Previous tick position (for teleport detection)
+    pub prev_pos: Option<(f32, f32)>,
+    /// Set when a kill is detected this tick (death tile, /kill, etc.)
+    pub killed_this_tick: bool,
 }
 
 impl TrackedPlayer {
@@ -97,15 +102,18 @@ pub struct World {
     pub tracked_players: RefCell<HashMap<u32, TrackedPlayer>>,
     /// Completed player sequences (after player_leave)
     pub completed_players: RefCell<Vec<TrackedPlayer>>,
+    /// Map name for diagnostic messages
+    pub map_name: String,
 }
 
 impl World {
-    pub fn new(world: DdnetReplayerWorld) -> Self {
+    pub fn new(world: DdnetReplayerWorld, map_name: String) -> Self {
         Self {
             world,
             current_tick: SnapTick::default(),
             tracked_players: RefCell::new(HashMap::new()),
             completed_players: RefCell::new(Vec::new()),
+            map_name,
         }
     }
 }
@@ -132,6 +140,8 @@ impl Game for World {
                 current_team: 0,
                 current_practice: false,
                 completed_regions: Vec::new(),
+                prev_pos: None,
+                killed_this_tick: false,
             },
         );
         self.world.player_ready(id);
@@ -158,9 +168,24 @@ impl Game for World {
     fn on_net_msg(&mut self, id: u32, msg: &ClNetMessage) {
         if matches!(msg, ClNetMessage::ClKill) {
             let current_tick = self.current_tick as i64;
-            if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
+            let mut tracked = self.tracked_players.borrow_mut();
+            if let Some(player) = tracked.get_mut(&id) {
+                let team = player.current_team;
+                debug!("kill (net_msg): player {} '{}' at tick {}", id, player.name, current_tick);
                 player.close_region(current_tick, RegionEndReason::Kill);
+                player.killed_this_tick = true;
+                // team reset: close region and mark all teammates as killed too
+                if team != 0 {
+                    for p in tracked.values_mut() {
+                        if p.player_id != id && p.current_team == team {
+                            debug!("kill (net_msg, team): player {} '{}' at tick {}", p.player_id, p.name, current_tick);
+                            p.close_region(current_tick, RegionEndReason::Kill);
+                            p.killed_this_tick = true;
+                        }
+                    }
+                }
             }
+            drop(tracked);
         }
         self.world.on_net_msg(id, msg);
     }
@@ -170,9 +195,24 @@ impl Game for World {
 
         match command {
             Command::Kill => {
-                if let Some(player) = self.tracked_players.borrow_mut().get_mut(&id) {
+                let mut tracked = self.tracked_players.borrow_mut();
+                if let Some(player) = tracked.get_mut(&id) {
+                    let team = player.current_team;
+                    debug!("kill (command): player {} '{}' at tick {}", id, player.name, current_tick);
                     player.close_region(current_tick, RegionEndReason::Kill);
+                    player.killed_this_tick = true;
+                    // team reset: close region and mark all teammates as killed too
+                    if team != 0 {
+                        for p in tracked.values_mut() {
+                            if p.player_id != id && p.current_team == team {
+                                debug!("kill (command, team): player {} '{}' at tick {}", p.player_id, p.name, current_tick);
+                                p.close_region(current_tick, RegionEndReason::Kill);
+                                p.killed_this_tick = true;
+                            }
+                        }
+                    }
                 }
+                drop(tracked);
             }
             // team changes are detected in snap_and_write from snap data,
             // which is the ground truth. Detecting here too would cause

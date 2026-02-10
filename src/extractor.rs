@@ -4,6 +4,7 @@ use crate::sequence::{
 };
 use crate::world::World;
 use anyhow::{Context, Result};
+use log::{debug, warn};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
@@ -19,6 +20,10 @@ use teehistorian_replayer::twgame_core::{replay::DemoWrite, Snapper};
 use teehistorian_replayer::ThReplayer;
 use twgame::{DdnetReplayerWorld, Map, ThHeader};
 
+/// Maximum legit distance (in tile units) per tick before triggering teleport check.
+/// ~3 tiles. Squared for fast comparison.
+const TELEPORT_DIST_SQ_THRESHOLD: f32 = 3.0 * 3.0;
+
 /// Captures tick data during replay
 struct DataCapturingWriter {
     current_tick: i64,
@@ -26,15 +31,82 @@ struct DataCapturingWriter {
     pending_practice_players: Vec<i32>,
     /// Teams that have practice mode enabled
     practice_teams: HashSet<i32>,
+    /// sv_rescue=1 in server config: all players can /r without practice.
+    /// When true, all players are treated as having practice enabled.
+    // TODO: this is overly broad — players only have access to /r, not full practice.
+    // in the future we should check if players actually use /r or /rescue rather than
+    // blanket-flagging everyone as practice.
+    sv_rescue: bool,
+    /// Map data for teleporter tile lookups
+    map: Arc<Map>,
+    /// Teehistorian file path for log messages
+    file_path: String,
 }
 
 impl DataCapturingWriter {
-    fn new() -> Self {
+    fn new(map: Arc<Map>, sv_rescue: bool, file_path: String) -> Self {
         Self {
             current_tick: 0,
             pending_practice_players: Vec::new(),
             practice_teams: HashSet::new(),
+            sv_rescue,
+            map,
+            file_path,
         }
+    }
+
+    /// Check if a large position jump is caused by a teleporter.
+    /// Checks both: tele entrance near prev_pos, and tele exit near current_pos.
+    fn is_map_teleport(&self, prev_x: f32, prev_y: f32, cur_x: f32, cur_y: f32) -> bool {
+        // check if prev pos is near a tele entrance tile (5x5 grid to account for high-speed entry)
+        // positions are in tile units, truncate to tile index (x.5 = center of tile x)
+        let tile_x = prev_x as i32;
+        let tile_y = prev_y as i32;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                if self
+                    .map
+                    .get_tele_tile(vek::Vec2::new(tile_x + dx, tile_y + dy))
+                    .is_some()
+                {
+                    return true;
+                }
+            }
+        }
+
+        // check if current pos is near a tele exit position
+        let cur_tile_x = cur_x as i32;
+        let cur_tile_y = cur_y as i32;
+        for exits in &self.map.tele_outs {
+            for exit in exits {
+                if (exit.x - cur_tile_x).abs() <= 1 && (exit.y - cur_tile_y).abs() <= 1 {
+                    return true;
+                }
+            }
+        }
+        for exits in &self.map.tele_checkpoint_outs {
+            for exit in exits {
+                if (exit.x - cur_tile_x).abs() <= 1 && (exit.y - cur_tile_y).abs() <= 1 {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if a position is exactly on a spawn point (death-tile kill or spawn reassignment).
+    fn is_spawn_position(&self, x: f32, y: f32) -> bool {
+        let tile_x = x as i32;
+        let tile_y = y as i32;
+        for spawn_set in &self.map.spawn_points {
+            for sp in spawn_set {
+                if sp.x == tile_x && sp.y == tile_y {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -44,6 +116,7 @@ impl DemoChatWrite for DataCapturingWriter {
     }
 
     fn write_player_chat(&mut self, player_id: i32, msg: &str) -> Result<(), WriteError> {
+        debug!("chat: player {} at tick {}: {}", player_id, self.current_tick, msg);
         if msg.starts_with("/practice") {
             self.pending_practice_players.push(player_id);
         }
@@ -108,7 +181,65 @@ impl DemoWrite<World> for DataCapturingWriter {
                 continue;
             };
             let input = input.clone();
+            let prev_pos = tracked.prev_pos;
+            let is_practice = tracked.current_practice;
+            let killed_this_tick = tracked.killed_this_tick;
+            tracked.killed_this_tick = false;
             drop(tracked_players);
+
+            let pos_x = tee.pos.x.to_num::<f32>();
+            let pos_y = tee.pos.y.to_num::<f32>();
+
+            // teleport detection: large position change -> check cause
+            if let Some((prev_x, prev_y)) = prev_pos {
+                let dx = pos_x - prev_x;
+                let dy = pos_y - prev_y;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq > TELEPORT_DIST_SQ_THRESHOLD && killed_this_tick {
+                    let dist = dist_sq.sqrt();
+                    debug!(
+                        "kill-respawn: {} at tick {} on map '{}' jumped {dist:.1} tiles \
+                         from ({prev_x:.1}, {prev_y:.1}) to ({pos_x:.1}, {pos_y:.1})",
+                        player.name, self.current_tick, world.map_name,
+                    );
+                }
+                if dist_sq > TELEPORT_DIST_SQ_THRESHOLD && !killed_this_tick {
+                    let is_tile_tp = self.is_map_teleport(prev_x, prev_y, pos_x, pos_y);
+                    // assume /r command caused the teleport when sv_rescue is enabled
+                    let is_spawn_tp = self.is_spawn_position(pos_x, pos_y);
+                    if is_tile_tp || is_practice || self.sv_rescue {
+                        world
+                            .tracked_players
+                            .borrow_mut()
+                            .get_mut(&snap_id.0)
+                            .expect("player disappeared mid-tick")
+                            .close_region(self.current_tick, RegionEndReason::Teleport);
+                    } else if is_spawn_tp {
+                        // death-tile kill or spawn reassignment — no kill event in teehistorian
+                        world
+                            .tracked_players
+                            .borrow_mut()
+                            .get_mut(&snap_id.0)
+                            .expect("player disappeared mid-tick")
+                            .close_region(self.current_tick, RegionEndReason::Kill);
+                    } else {
+                        let dist = dist_sq.sqrt();
+                        warn!(
+                            "unknown large position jump ({dist:.1} tiles) for '{}' at tick {} \
+                             on map '{}' from ({prev_x:.1}, {prev_y:.1}) to ({pos_x:.1}, {pos_y:.1}) \
+                             in {}",
+                            player.name, self.current_tick, world.map_name,
+                            self.file_path,
+                        );
+                        world
+                            .tracked_players
+                            .borrow_mut()
+                            .get_mut(&snap_id.0)
+                            .expect("player disappeared mid-tick")
+                            .close_region(self.current_tick, RegionEndReason::UnknownTeleport);
+                    }
+                }
+            }
 
             let aim_angle = tee.angle.to_num::<f32>();
             let is_frozen = tee.freeze_end > tick;
@@ -146,10 +277,10 @@ impl DemoWrite<World> for DataCapturingWriter {
 
             let tick_data = TickData {
                 tick: self.current_tick,
-                pos_x: tee.pos.x.to_num::<f32>(),
-                pos_y: tee.pos.y.to_num::<f32>(),
-                vel_x: tee.vel.x.to_num::<f32>(),
-                vel_y: tee.vel.y.to_num::<f32>(),
+                pos_x,
+                pos_y,
+                vel_x: tee.vel.x.to_num::<f32>() / 32.0,
+                vel_y: tee.vel.y.to_num::<f32>() / 32.0,
                 cursor_x,
                 cursor_y,
                 aim_angle,
@@ -171,13 +302,13 @@ impl DemoWrite<World> for DataCapturingWriter {
             };
 
             // push directly into TrackedPlayer so data follows it on player_leave
-            world
-                .tracked_players
-                .borrow_mut()
+            let mut tracked_players = world.tracked_players.borrow_mut();
+            let tracked = tracked_players
                 .get_mut(&snap_id.0)
-                .expect("player disappeared mid-tick")
-                .data
-                .push(tick_data);
+                .expect("player disappeared mid-tick");
+            tracked.data.push(tick_data);
+            tracked.prev_pos = Some((pos_x, pos_y));
+            drop(tracked_players);
         }
 
         // process pending /practice commands
@@ -226,6 +357,7 @@ pub fn extract_sequences(
     let header_raw = th_stream.header()?;
     let th_header = ThHeader::from_buf(header_raw);
 
+    debug!("processing: {}", teehistorian_path.display());
     let map_name = th_header.map_name.clone();
     let start_time = th_header.start_time.clone();
     let map_sha256 = th_header.map_sha256.clone();
@@ -236,13 +368,19 @@ pub fn extract_sequences(
     let mut parsed_map = twmap::TwMap::parse(&map_data)?;
     let map = Map::try_from(&mut parsed_map).map_err(|e| anyhow::anyhow!(e))?;
     let map = Arc::new(map);
+    let map_for_writer = Arc::clone(&map);
 
     // create the replayer world with finish tracking
     let inner_world = DdnetReplayerWorld::new(map, false);
-    let mut world = World::new(inner_world);
+    let mut world = World::new(inner_world, map_name.clone());
 
     // create our custom data capturing writer
-    let mut data_writer = DataCapturingWriter::new();
+    let sv_rescue = th_header.config.get("sv_rescue").map_or(false, |v| v == "1");
+    let mut data_writer = DataCapturingWriter::new(
+        map_for_writer,
+        sv_rescue,
+        teehistorian_path.display().to_string(),
+    );
 
     // replay the game and capture data
     let replayer = ThReplayer::new(header_raw, &mut world);
@@ -260,6 +398,7 @@ pub fn extract_sequences(
     let tracked = world.tracked_players.into_inner().into_values();
     drop(world.world); // free DdnetReplayerWorld + Arc<Map> before building sequences
     drop(th_stream); // free the teehistorian reader
+    drop(data_writer); // free the writer's Arc<Map> clone
     let all_players = completed.into_iter().chain(tracked);
 
     // convert to PlayerSequence
