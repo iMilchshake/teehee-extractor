@@ -21,6 +21,8 @@ pub enum RegionEndReason {
     Teleport,
     /// Large position jump with no known cause
     UnknownTeleport,
+    /// Tee disappeared from world (death/kill tile)
+    TeeDisappear,
     /// Tick gap with unknown cause
     Unknown,
 }
@@ -39,12 +41,13 @@ impl RegionEndReason {
             RegionEndReason::Unknown => 7,
             RegionEndReason::Teleport => 8,
             RegionEndReason::UnknownTeleport => 9,
+            RegionEndReason::TeeDisappear => 10,
         }
     }
 
     /// Names for all enum variants (for HDF5 attribute)
     pub fn names() -> &'static str {
-        "Kill,TeamChange,SwapTees,Spectate,Afk,Leave,ChangeMap,Unknown,Teleport,UnknownTeleport"
+        "Kill,TeamChange,SwapTees,Spectate,Afk,Leave,ChangeMap,Unknown,Teleport,UnknownTeleport,TeeDisappear"
     }
 }
 

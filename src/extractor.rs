@@ -22,7 +22,7 @@ use twgame::{DdnetReplayerWorld, Map, ThHeader};
 
 /// Maximum legit distance (in tile units) per tick before triggering teleport check.
 /// ~3 tiles. Squared for fast comparison.
-const TELEPORT_DIST_SQ_THRESHOLD: f32 = 3.0 * 3.0;
+const TELEPORT_DIST_SQ_THRESHOLD: f32 = 5.0 * 5.0;
 
 /// Captures tick data during replay
 struct DataCapturingWriter {
@@ -116,7 +116,10 @@ impl DemoChatWrite for DataCapturingWriter {
     }
 
     fn write_player_chat(&mut self, player_id: i32, msg: &str) -> Result<(), WriteError> {
-        debug!("chat: player {} at tick {}: {}", player_id, self.current_tick, msg);
+        debug!(
+            "chat: player {} at tick {}: {}",
+            player_id, self.current_tick, msg
+        );
         if msg.starts_with("/practice") {
             self.pending_practice_players.push(player_id);
         }
@@ -174,7 +177,14 @@ impl DemoWrite<World> for DataCapturingWriter {
 
             tracked.team = player.team;
 
-            let tee = player.tee.as_ref().expect("tracked player must have tee");
+            // tee absent = death/kill tile removed the tee from the world.
+            // close the current region and reset prev_pos so reappearance
+            // doesn't trigger false teleport detection.
+            let Some(tee) = player.tee.as_ref() else {
+                tracked.close_region(self.current_tick, RegionEndReason::TeeDisappear);
+                tracked.prev_pos = None;
+                continue;
+            };
 
             // skip tick if no input received yet
             let Some(input) = &tracked.input else {
@@ -365,7 +375,9 @@ pub fn extract_sequences(
     // load the map from the maps directory
     let map_data = load_map_from_dir(maps_dir, &map_name, map_sha256.as_deref())?;
 
-    let mut parsed_map = twmap::TwMap::parse(&map_data)?;
+    // skip visual validation (images, envelopes, tiles) — only game physics matter
+    // TODO: try parse() first, fallback to parse_unchecked() on failure and flag the map
+    let mut parsed_map = twmap::TwMap::parse_unchecked(&map_data)?;
     let map = Map::try_from(&mut parsed_map).map_err(|e| anyhow::anyhow!(e))?;
     let map = Arc::new(map);
     let map_for_writer = Arc::clone(&map);
@@ -375,7 +387,10 @@ pub fn extract_sequences(
     let mut world = World::new(inner_world, map_name.clone());
 
     // create our custom data capturing writer
-    let sv_rescue = th_header.config.get("sv_rescue").map_or(false, |v| v == "1");
+    let sv_rescue = th_header
+        .config
+        .get("sv_rescue")
+        .map_or(false, |v| v == "1");
     let mut data_writer = DataCapturingWriter::new(
         map_for_writer,
         sv_rescue,
@@ -405,15 +420,11 @@ pub fn extract_sequences(
     let time_of_day = start_time;
     let mut sequences = Vec::new();
 
-    for mut player in all_players {
-        assert!(
-            !player.name.is_empty(),
-            "player {} has no name",
-            player.player_id
-        );
+    const MIN_TICKS: usize = 500; // 10 seconds at 50 Hz
 
-        // skip empty sequences
-        if player.data.is_empty() {
+    for mut player in all_players {
+        // silently drop players with no name or less than 10 seconds of data
+        if player.name.is_empty() || player.data.len() < MIN_TICKS {
             continue;
         }
 

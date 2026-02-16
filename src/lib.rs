@@ -3,6 +3,7 @@ mod extractor;
 pub mod features;
 mod hdf5_export;
 mod parquet_export;
+pub mod postprocess;
 mod sequence;
 mod world;
 

@@ -57,6 +57,11 @@ enum Command {
         /// Only process the first N files (useful for testing)
         #[arg(long)]
         limit: Option<usize>,
+
+        /// Keep raw cursor values without capping distance (default: cap at 20,
+        /// rescaling cursor_x/cursor_y to preserve aim angle)
+        #[arg(long)]
+        raw_cursor: bool,
     },
     /// List all available features and groups
     ListFeatures,
@@ -94,6 +99,7 @@ fn main() -> Result<()> {
             no_afk,
             threads,
             limit,
+            raw_cursor,
         } => {
             // parse feature selection
             let feature_set = match &features {
@@ -124,9 +130,9 @@ fn main() -> Result<()> {
             }
 
             if input.is_dir() {
-                extract_directory(&input, &output, &maps_dir, &feature_set, afk_ticks, limit)?;
+                extract_directory(&input, &output, &maps_dir, &feature_set, afk_ticks, limit, raw_cursor)?;
             } else {
-                extract_single_file(&input, &output, &maps_dir, &feature_set, afk_ticks)?;
+                extract_single_file(&input, &output, &maps_dir, &feature_set, afk_ticks, raw_cursor)?;
             }
         }
     }
@@ -140,10 +146,14 @@ fn extract_single_file(
     maps_dir: &PathBuf,
     feature_set: &FeatureSet,
     afk_ticks: Option<usize>,
+    raw_cursor: bool,
 ) -> Result<()> {
     println!("Extracting sequences from: {}", input.display());
 
-    let sequences = extract_sequences(input, maps_dir, afk_ticks)?;
+    let mut sequences = extract_sequences(input, maps_dir, afk_ticks)?;
+    if !raw_cursor {
+        teehee_extractor::postprocess::cap_cursor_distance(&mut sequences, 20.0);
+    }
 
     println!("Found {} player sequences", sequences.len());
 
@@ -183,6 +193,7 @@ fn extract_directory(
     feature_set: &FeatureSet,
     afk_ticks: Option<usize>,
     limit: Option<usize>,
+    raw_cursor: bool,
 ) -> Result<()> {
     // collect all .teehistorian files
     let mut files: Vec<PathBuf> = std::fs::read_dir(input_dir)?
@@ -216,6 +227,7 @@ fn extract_directory(
 
     let started = Instant::now();
     let errors = std::sync::atomic::AtomicUsize::new(0);
+    let empty = std::sync::atomic::AtomicUsize::new(0);
     let processed = std::sync::atomic::AtomicUsize::new(0);
     let total_sequences = std::sync::atomic::AtomicUsize::new(0);
 
@@ -229,7 +241,7 @@ fn extract_directory(
 
         // catch panics (e.g. assert failures on corrupt data)
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            extract_and_write_parquet(file, maps_dir, output_dir, feature_set, afk_ticks)
+            extract_and_write_parquet(file, maps_dir, output_dir, feature_set, afk_ticks, raw_cursor)
         }));
 
         let n = processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -240,6 +252,7 @@ fn extract_directory(
                     total_sequences.fetch_add(n_seq, std::sync::atomic::Ordering::Relaxed);
                     debug!("[{n}/{n_files}] {filename} -> {n_seq} sequences, {n_ticks} ticks");
                 } else {
+                    empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     debug!("[{n}/{n_files}] {filename} -> empty, skipped");
                 }
             }
@@ -256,10 +269,12 @@ fn extract_directory(
 
     let elapsed = started.elapsed();
     let n_errors = errors.load(std::sync::atomic::Ordering::Relaxed);
+    let n_empty = empty.load(std::sync::atomic::Ordering::Relaxed);
     let n_seqs = total_sequences.load(std::sync::atomic::Ordering::Relaxed);
+    let n_ok = n_files - n_errors - n_empty;
 
     println!(
-        "Done! Wrote {n_seqs} sequences to {} in {:.1}s ({n_files} files, {n_errors} errors)",
+        "Done! Wrote {n_seqs} sequences to {} in {:.1}s ({n_files} files, {n_ok} with data, {n_empty} empty, {n_errors} errors)",
         output_dir.display(),
         elapsed.as_secs_f64()
     );
@@ -275,8 +290,12 @@ fn extract_and_write_parquet(
     output_dir: &PathBuf,
     feature_set: &FeatureSet,
     afk_ticks: Option<usize>,
+    raw_cursor: bool,
 ) -> Result<(usize, usize)> {
-    let sequences = extract_sequences(file, maps_dir, afk_ticks)?;
+    let mut sequences = extract_sequences(file, maps_dir, afk_ticks)?;
+    if !raw_cursor {
+        teehee_extractor::postprocess::cap_cursor_distance(&mut sequences, 20.0);
+    }
     if sequences.is_empty() {
         return Ok((0, 0));
     }

@@ -15,3 +15,5 @@
 
 ## Future
 - detect crossing start line?
+- improve player identity with timeout codes 
+- 
