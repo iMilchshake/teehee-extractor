@@ -14,6 +14,8 @@ use teehistorian_replayer::teehistorian::{ThBufReader, ThCompat, ThStream};
 use teehistorian_replayer::twgame_core::replay::DemoChatWrite;
 use teehistorian_replayer::twgame_core::twsnap::compat::ddnet::WriteError;
 use teehistorian_replayer::twgame_core::twsnap::enums::{ActiveWeapon, HookState};
+use teehistorian_replayer::twgame_core::twsnap::flags::JumpFlags;
+
 use teehistorian_replayer::twgame_core::twsnap::time::Instant;
 use teehistorian_replayer::twgame_core::twsnap::Snap;
 use teehistorian_replayer::twgame_core::{replay::DemoWrite, Snapper};
@@ -281,16 +283,22 @@ impl DemoWrite<World> for DataCapturingWriter {
             let is_gun = tee.weapon == ActiveWeapon::Pistol;
             let is_other_weapon = !is_hammer && !is_gun;
 
-            // jump state
-            let is_grounded = tee.jumps >= 2; // TODO: this is wrong xd
-            let can_jump = tee.jumps > 0;
+            let vel_x = tee.vel.x.to_num::<f32>() / 32.0;
+            let vel_y = tee.vel.y.to_num::<f32>() / 32.0;
+
+            // jump state from JumpFlags + vel_y
+            // NOTE: assumes default 2 jumps. maps with jump count tiles (3+, infinite)
+            // will not be accurately represented.
+            let is_grounded = vel_y.abs() < 0.1
+                && !tee.jumped.contains(JumpFlags::USED_JUMP_INPUT);
+            let can_jump = !tee.jumped.contains(JumpFlags::ALL_AIR_JUMPS_USED);
 
             let tick_data = TickData {
                 tick: self.current_tick,
                 pos_x,
                 pos_y,
-                vel_x: tee.vel.x.to_num::<f32>() / 32.0,
-                vel_y: tee.vel.y.to_num::<f32>() / 32.0,
+                vel_x,
+                vel_y,
                 cursor_x,
                 cursor_y,
                 aim_angle,
@@ -307,7 +315,6 @@ impl DemoWrite<World> for DataCapturingWriter {
                 is_hammer: if is_hammer { 1.0 } else { 0.0 },
                 is_gun: if is_gun { 1.0 } else { 0.0 },
                 is_other_weapon: if is_other_weapon { 1.0 } else { 0.0 },
-                jumps_remaining: tee.jumps as f32,
                 can_jump: if can_jump { 1.0 } else { 0.0 },
             };
 

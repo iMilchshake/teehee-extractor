@@ -35,7 +35,6 @@ pub enum Feature {
     IsGun,
     IsOtherWeapon,
     // jumps group
-    JumpsRemaining,
     CanJump,
 }
 
@@ -63,7 +62,6 @@ impl Feature {
             Feature::IsHammer => "is_hammer",
             Feature::IsGun => "is_gun",
             Feature::IsOtherWeapon => "is_other_weapon",
-            Feature::JumpsRemaining => "jumps_remaining",
             Feature::CanJump => "can_jump",
         }
     }
@@ -80,7 +78,7 @@ impl Feature {
             Feature::IsGrounded | Feature::FreezeStatus => "state",
             Feature::HookGrabbed | Feature::HookPosX | Feature::HookPosY => "hook",
             Feature::IsHammer | Feature::IsGun | Feature::IsOtherWeapon => "weapons",
-            Feature::JumpsRemaining | Feature::CanJump => "jumps",
+            Feature::CanJump => "jumps",
         }
     }
 
@@ -107,7 +105,6 @@ impl Feature {
             Feature::IsHammer,
             Feature::IsGun,
             Feature::IsOtherWeapon,
-            Feature::JumpsRemaining,
             Feature::CanJump,
         ]
     }
@@ -241,7 +238,6 @@ impl FeatureSet {
             Feature::IsHammer => tick.is_hammer,
             Feature::IsGun => tick.is_gun,
             Feature::IsOtherWeapon => tick.is_other_weapon,
-            Feature::JumpsRemaining => tick.jumps_remaining,
             Feature::CanJump => tick.can_jump,
         }
     }
@@ -271,7 +267,6 @@ impl FeatureSet {
                 Feature::IsHammer => tick.is_hammer,
                 Feature::IsGun => tick.is_gun,
                 Feature::IsOtherWeapon => tick.is_other_weapon,
-                Feature::JumpsRemaining => tick.jumps_remaining,
                 Feature::CanJump => tick.can_jump,
             })
             .collect()

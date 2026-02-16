@@ -125,7 +125,6 @@ pub struct TickData {
     pub is_gun: f32,
     pub is_other_weapon: f32,
     // jumping
-    pub jumps_remaining: f32,
     pub can_jump: f32,
 }
 
